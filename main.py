@@ -57,6 +57,7 @@ def cmd_ingest(path: str) -> None:
 def cmd_ask(question: str, mode: str = "medical_qa") -> None:
     """单次问答。"""
     from src.rag_chain import create_rag_chain
+    from src.callbacks import TokenLoggingCallback
 
     logger.info("===== CLI 问答 =====")
     logger.info("用户输入 (mode=%s): %s", mode, question)
@@ -65,7 +66,7 @@ def cmd_ask(question: str, mode: str = "medical_qa") -> None:
     print(f"\n检索中（模式: {mode}）...\n")
 
     try:
-        answer = chain.invoke(question)
+        answer = chain.invoke(question, config={"callbacks": [TokenLoggingCallback()]})
         logger.info("生成回答: %d 字符", len(answer))
         logger.debug("回答内容: %s", answer)
         print(answer)

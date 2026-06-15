@@ -25,12 +25,19 @@ class Settings(BaseSettings):
     milvus_host: str = "localhost"
     milvus_port: int = 19530
 
+    # PostgreSQL (Docker)
+    pg_host: str = "localhost"
+    pg_port: int = 5432
+    pg_database: str = "hospital_rag"
+    pg_user: str = "postgres"
+    pg_password: str = "postgres"
+
     # Chunking
     chunk_size: int = 512
     chunk_overlap: int = 50
 
     # Retrieval
-    retrieval_top_k: int = 5
+    retrieval_top_k: int = 3
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

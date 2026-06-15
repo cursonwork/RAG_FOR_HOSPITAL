@@ -1,10 +1,20 @@
 import tempfile
+import uuid
 from pathlib import Path
 
 import streamlit as st
 
+from src.callbacks import TokenLoggingCallback
+from src.chat_history import PostgresChatMessageHistory
 from src.config import settings
-from src.conversation import create_conversational_chain, _store
+from src.conversation import create_conversational_chain
+from src.database import (
+    create_session,
+    delete_session,
+    get_or_create_user,
+    list_user_sessions,
+    update_session_mode,
+)
 from src.document_loader import load_pdf
 from src.logger import get_logger
 from src.vector_store import add_documents_to_store
@@ -17,34 +27,138 @@ st.set_page_config(page_title="医疗RAG系统", page_icon="🏥", layout="wide"
 st.markdown("""
 <style>
     .stChatMessage { padding: 1rem; border-radius: 10px; margin-bottom: 0.5rem; }
-    .mode-tag { display: inline-block; padding: 2px 8px; border-radius: 4px;
-                font-size: 0.75rem; font-weight: 600; margin-right: 6px; }
-    .tag-qa { background: #e3f2fd; color: #1565c0; }
-    .tag-drug { background: #e8f5e9; color: #2e7d32; }
-    .tag-diag { background: #fff3e0; color: #e65100; }
 </style>
 """, unsafe_allow_html=True)
 
 # ── 会话状态初始化 ──
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "mode" not in st.session_state:
-    st.session_state.mode = "medical_qa"
-if "chain" not in st.session_state:
-    st.session_state.chain = create_conversational_chain("medical_qa")
-if "doc_count" not in st.session_state:
-    st.session_state.doc_count = 0
+_defaults = {
+    "username": "",
+    "user_id": None,
+    "session_id": None,
+    "messages": [],
+    "mode": "medical_qa",
+    "chain": None,
+    "doc_count": 0,
+}
+for _key, _val in _defaults.items():
+    if _key not in st.session_state:
+        st.session_state[_key] = _val
 
-SESSION_ID = "default"
+MODE_EMOJI = {"medical_qa": "🩺", "drug_query": "💊", "diagnosis": "🩻"}
 
-# ── 侧边栏：文档管理 ──
+
+def _load_messages_from_db(session_id: str) -> list[dict]:
+    """从 PostgreSQL 加载会话消息，转为 Streamlit 展示格式。"""
+    history = PostgresChatMessageHistory(session_id=session_id)
+    msgs = []
+    for m in history.messages:
+        role = "user" if m.type == "human" else "assistant"
+        msgs.append({"role": role, "content": m.content})
+    return msgs
+
+
+# ═══════════════════════════════════════════
+# 侧边栏
+# ═══════════════════════════════════════════
+
 with st.sidebar:
-    st.header("📚 知识库管理")
+    st.header("👤 用户")
+
+    username = st.text_input(
+        "用户名",
+        value=st.session_state.username,
+        placeholder="输入用户名开始使用...",
+        label_visibility="collapsed",
+    )
+
+    if username and username != st.session_state.username:
+        st.session_state.username = username
+        st.session_state.user_id = get_or_create_user(username)
+        new_id = uuid.uuid4().hex[:16]
+        create_session(new_id, st.session_state.user_id, st.session_state.mode)
+        st.session_state.session_id = new_id
+        st.session_state.messages = []
+        st.session_state.chain = create_conversational_chain(st.session_state.mode)
+        logger.info("用户登录: %s (user_id=%d, session=%s)",
+                    username, st.session_state.user_id, new_id)
+        st.rerun()
+
+    if not st.session_state.user_id:
+        st.info("请输入用户名以开始使用")
+        st.stop()
+
+    st.divider()
+
+    # ── 会话管理 ──
+    st.header("💬 会话")
+
+    if st.button("➕ 新建会话", use_container_width=True):
+        new_id = uuid.uuid4().hex[:16]
+        create_session(new_id, st.session_state.user_id, st.session_state.mode)
+        st.session_state.session_id = new_id
+        st.session_state.messages = []
+        st.session_state.chain = create_conversational_chain(st.session_state.mode)
+        st.rerun()
+
+    sessions = list_user_sessions(st.session_state.user_id)
+
+    for s in sessions:
+        sid, mode, title, _created, updated_at, first_q = s
+        is_active = sid == st.session_state.session_id
+
+        label = title or first_q or "新会话"
+        if len(label) > 22:
+            label = label[:22] + "..."
+
+        emoji = MODE_EMOJI.get(mode, "")
+        ts = updated_at.strftime("%m-%d %H:%M")
+
+        col_btn, col_del = st.columns([6, 1])
+        with col_btn:
+            btn_type = "primary" if is_active else "secondary"
+            if st.button(
+                f"{emoji} {label}  — {ts}",
+                key=f"sess_{sid}",
+                type=btn_type,
+                use_container_width=True,
+            ):
+                st.session_state.session_id = sid
+                st.session_state.mode = mode
+                st.session_state.messages = _load_messages_from_db(sid)
+                st.session_state.chain = create_conversational_chain(mode)
+                st.rerun()
+        with col_del:
+            if st.button("🗑️", key=f"del_{sid}", help="删除此会话"):
+                delete_session(sid)
+                if is_active:
+                    remaining = list_user_sessions(st.session_state.user_id)
+                    if remaining:
+                        st.session_state.session_id = remaining[0][0]
+                        st.session_state.mode = remaining[0][1]
+                        st.session_state.messages = _load_messages_from_db(
+                            remaining[0][0]
+                        )
+                    else:
+                        new_id = uuid.uuid4().hex[:16]
+                        create_session(new_id, st.session_state.user_id, "medical_qa")
+                        st.session_state.session_id = new_id
+                        st.session_state.messages = []
+                        st.session_state.mode = "medical_qa"
+                    st.session_state.chain = create_conversational_chain(
+                        st.session_state.mode
+                    )
+                st.rerun()
+
+    st.divider()
+
+    # ── 文档管理 ──
+    st.header("📚 知识库")
 
     uploaded_files = st.file_uploader(
         "上传医学文献 PDF",
         type=["pdf"],
         accept_multiple_files=True,
+        label_visibility="collapsed",
     )
 
     if uploaded_files:
@@ -87,9 +201,12 @@ with st.sidebar:
     st.divider()
     st.caption(f"Embedding: {settings.embedding_model_name}")
     st.caption(f"LLM: {settings.deepseek_model}")
-    st.caption(f"向量库: Milvus")
+    st.caption("向量库: Milvus | 会话: PostgreSQL")
 
-# ── 主区域：对话界面 ──
+# ═══════════════════════════════════════════
+# 主区域：对话界面
+# ═══════════════════════════════════════════
+
 mode_labels = {
     "medical_qa": ("🩺 医疗问答", "tag-qa"),
     "drug_query": ("💊 药物查询", "tag-drug"),
@@ -101,13 +218,14 @@ for i, (mode_key, (label, _)) in enumerate(mode_labels.items()):
     with cols[i]:
         is_active = st.session_state.mode == mode_key
         btn_type = "primary" if is_active else "secondary"
-        if st.button(label, key=mode_key, type=btn_type, use_container_width=True):
-            logger.info("切换模式: %s", mode_key)
-            st.session_state.mode = mode_key
-            st.session_state.chain = create_conversational_chain(mode_key)
-            st.session_state.messages = []
-            _store.pop(SESSION_ID, None)
-            st.rerun()
+        if st.button(label, key=f"mode_{mode_key}", type=btn_type, use_container_width=True):
+            if st.session_state.mode != mode_key:
+                logger.info("切换模式: %s -> %s", st.session_state.mode, mode_key)
+                st.session_state.mode = mode_key
+                if st.session_state.session_id:
+                    update_session_mode(st.session_state.session_id, mode_key)
+                st.session_state.chain = create_conversational_chain(mode_key)
+                st.rerun()
 
 st.divider()
 
@@ -118,17 +236,25 @@ for msg in st.session_state.messages:
 
 # ── 输入区 ──
 if question := st.chat_input("请输入您的医疗问题..."):
-    logger.info("用户提问 (mode=%s): %s", st.session_state.mode, question[:200])
+    logger.info("用户提问 (user=%s, mode=%s, session=%s): %s",
+                st.session_state.username, st.session_state.mode,
+                st.session_state.session_id, question[:200])
+
+    if st.session_state.chain is None:
+        st.session_state.chain = create_conversational_chain(st.session_state.mode)
+
     st.chat_message("user").markdown(question)
     st.session_state.messages.append({"role": "user", "content": question})
 
     with st.chat_message("assistant"):
         with st.spinner("检索中..."):
             try:
-                chain = st.session_state.chain
-                result = chain.invoke(
+                result = st.session_state.chain.invoke(
                     {"question": question},
-                    config={"configurable": {"session_id": SESSION_ID}},
+                    config={
+                        "configurable": {"session_id": st.session_state.session_id},
+                        "callbacks": [TokenLoggingCallback()],
+                    },
                 )
                 logger.info("生成回答: %d 字符", len(result))
                 logger.debug("回答内容: %s", result[:500])
