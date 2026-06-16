@@ -7,11 +7,12 @@ from langchain_core.runnables import RunnableLambda, RunnableParallel
 from langchain_core.runnables.history import RunnableWithMessageHistory
 
 from src.chat_history import PostgresChatMessageHistory
+from src.config import settings
 from src.intent import classify_intent
 from src.llm import create_llm
 from src.logger import get_logger
 from src.prompts import get_system_prompt
-from src.rag_chain import format_docs
+from src.rag_chain import format_docs, _retrieve_and_rank
 from src.vector_store import get_retriever
 
 logger = get_logger(__name__)
@@ -24,9 +25,10 @@ def _get_session_history(session_id: str) -> BaseChatMessageHistory:
 
 
 def create_conversational_chain(mode: str | None = None):
-    """创建多轮对话 RAG 链，自动意图识别 + 路由 System Prompt。
+    """创建多轮对话 RAG 链，自动意图识别 + 查询改写 + 混合检索 + 重排序。
 
     mode=None 时自动识别意图；传入具体值则跳过识别直接使用。
+    多轮对话中查询改写器会基于历史补全省略/指代。
     """
     llm = create_llm()
     retriever = get_retriever()
@@ -52,9 +54,16 @@ def create_conversational_chain(mode: str | None = None):
         ])
         return prompt.invoke({"question": question, "history": history})
 
+    def _retrieve_with_history(inputs: dict) -> str:
+        """带历史感知的检索管线。"""
+        question = inputs["question"]
+        history = inputs.get("history", [])
+        docs = _retrieve_and_rank(question, history)
+        return format_docs(docs)
+
     chain = (
         RunnableParallel(
-            context=itemgetter("question") | retriever | format_docs,
+            context=RunnableLambda(_retrieve_with_history),
             question=itemgetter("question"),
             history=itemgetter("history"),
         )

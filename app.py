@@ -86,10 +86,15 @@ def _load_messages_from_db(session_id: str) -> list[dict]:
 
 
 def _pre_retrieve(question: str, top_k: int = 5) -> None:
-    """检索并构建引用映射，同时返回上下文字符串供展示。"""
-    retriever = get_retriever()
-    docs = retriever.invoke(question)
+    """（已废弃）保留仅为向后兼容。使用 _build_citation_maps 代替。"""
+    pass
 
+
+def _build_citation_maps(docs: list) -> None:
+    """从检索到的文档列表构建引用映射和图片映射，供 UI 渲染使用。
+
+    在 chain.invoke 之后调用，避免重复检索。
+    """
     citation_map = {}
     image_map = {}
     image_index = {}
@@ -338,9 +343,6 @@ if question := st.chat_input("请输入您的医疗问题..."):
     st.session_state.messages.append({"role": "user", "content": question})
 
     with st.chat_message("assistant"):
-        # 1. 预检索，建立引用映射
-        _pre_retrieve(question)
-
         with st.spinner("检索中..."):
             try:
                 result = st.session_state.chain.invoke(
@@ -352,16 +354,20 @@ if question := st.chat_input("请输入您的医疗问题..."):
                 )
                 logger.info("生成回答: %d 字符", len(result))
 
-                # 2. 后处理：hover 引用
+                # 从最近一次检索构建引用映射（避免重复检索）
+                from src.rag_chain import get_last_retrieved_docs
+                _build_citation_maps(get_last_retrieved_docs())
+
+                # 后处理：hover 引用
                 rendered = _render_citations(result)
                 st.markdown(rendered, unsafe_allow_html=True)
-                # 3. 渲染匹配到的图片
+                # 渲染匹配到的图片
                 _render_images_after_answer(result)
 
                 st.session_state.messages.append({
                     "role": "assistant",
-                    "content": result,          # 纯文本（用于历史展示）
-                    "raw_content": rendered,    # HTML 版本（用于当前渲染）
+                    "content": result,
+                    "raw_content": rendered,
                 })
             except Exception as e:
                 logger.exception("问答异常")

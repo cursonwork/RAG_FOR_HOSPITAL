@@ -1,3 +1,12 @@
+"""Milvus 向量存储 + 混合检索。
+
+- 纯稠密检索：similarity_search / as_retriever
+- 混合检索：hybrid_search（客户端 BM25 + RRF 融合）
+
+BM25 使用 rank_bm25 客户端实现，文本常驻内存，不依赖 Milvus SPARSE_FLOAT_VECTOR。
+Milvus 仅存储稠密向量 + 元数据（chunk_id/source/page/section/chunk_type）。
+"""
+
 import uuid
 
 from langchain_core.documents import Document
@@ -15,7 +24,7 @@ DIMENSION = 1024
 
 
 class MilvusStore(VectorStore):
-    """基于 pymilvus MilvusClient 的向量存储，不依赖 ORM API。"""
+    """基于 pymilvus MilvusClient 的向量存储，支持稠密检索 + BM25 混合检索。"""
 
     def __init__(self) -> None:
         logger.info("连接 Milvus %s:%d", settings.milvus_host, settings.milvus_port)
@@ -27,6 +36,7 @@ class MilvusStore(VectorStore):
         self._ensure_collection()
 
     def _ensure_collection(self) -> None:
+        """确保 collection 存在（简单 schema：稠密向量 + 元数据）。"""
         if self._client.has_collection(COLLECTION_NAME):
             logger.debug("Collection '%s' 已存在", COLLECTION_NAME)
             return
@@ -76,11 +86,10 @@ class MilvusStore(VectorStore):
         for chunk, emb in zip(chunks, embeddings):
             chunk_id = uuid.uuid4().hex[:16]
             source = chunk.metadata.get("source", "")
-            page = chunk.metadata.get("page", 0) or 0  # opendataloader 用 num_pages，这里统一处理
+            page = chunk.metadata.get("page", 0)
             section = chunk.metadata.get("section_title", "")
             chunk_index = chunk.metadata.get("chunk_index", 0)
 
-            # 写 PG
             save_chunk(
                 chunk_id=chunk_id,
                 content=chunk.page_content,
@@ -117,7 +126,6 @@ class MilvusStore(VectorStore):
         if not records:
             return []
 
-        # 用 caption 作为临时向量文本
         texts = []
         for r in records:
             text = r.caption or f"[图片] {r.source} 第{r.page}页"
@@ -135,7 +143,6 @@ class MilvusStore(VectorStore):
         for record, emb in zip(records, embeddings):
             chunk_id = uuid.uuid4().hex[:16]
 
-            # PG chunks 表
             save_chunk(
                 chunk_id=chunk_id,
                 content=record.caption or "",
@@ -146,7 +153,6 @@ class MilvusStore(VectorStore):
                 chunk_type="image",
             )
 
-            # PG images 表（含 bbox）
             save_image(
                 image_id=record.id,
                 chunk_id=chunk_id,
@@ -196,7 +202,6 @@ class MilvusStore(VectorStore):
             if not record.chunk_id:
                 continue
             update_chunk_content(record.chunk_id, text)
-            # Milvus 不支持 update vector，删除旧 + 插入新
             self._client.delete(
                 collection_name=COLLECTION_NAME,
                 filter=f'chunk_id == "{record.chunk_id}"',
@@ -235,13 +240,14 @@ class MilvusStore(VectorStore):
         chunk_ids: list[str] = []
         milvus_data: list[dict] = []
 
-        for record, emb in zip(records, embeddings):
+        for i, (record, emb) in enumerate(zip(records, embeddings)):
             chunk_id = uuid.uuid4().hex[:16]
             image_id = record.id
+            text = texts[i]
 
             save_chunk(
                 chunk_id=chunk_id,
-                content=texts[records.index(record)],
+                content=text,
                 source=record.source,
                 page=record.page,
                 section_title="",
@@ -288,10 +294,15 @@ class MilvusStore(VectorStore):
             logger.info("已删除 collection: %s", COLLECTION_NAME)
         self._ensure_collection()
 
+    # ═══════════════════════════════════════════════════════════════
+    # 检索
+    # ═══════════════════════════════════════════════════════════════
+
     def similarity_search(
         self, query: str, k: int = 5, **kwargs
     ) -> list[Document]:
-        logger.debug("检索 query='%s...' k=%d", query[:80], k)
+        """纯稠密向量检索。"""
+        logger.debug("相似度检索 query='%s...' k=%d", query[:80], k)
 
         try:
             query_emb = self._embedding.embed_query(query)
@@ -310,8 +321,30 @@ class MilvusStore(VectorStore):
             logger.exception("Milvus 检索失败")
             raise
 
+        return self._hits_to_docs(results[0] if results else [])
+
+    def hybrid_search(
+        self, query: str, k: int | None = None, **kwargs
+    ) -> list[Document]:
+        """BM25 + 稠密向量混合检索，RRF 融合。
+
+        客户端 BM25 (rank_bm25) + Milvus 稠密向量 → RRF 融合。
+        """
+        k = k or settings.hybrid_retrieval_top_k
+
+        from src.hybrid_search import hybrid_search as do_hybrid
+
+        def dense_fn(q, n):
+            return self.similarity_search(q, k=n)
+
+        return do_hybrid(query, dense_fn, k_dense=k * 2, k_sparse=k * 2, k_final=k)
+
+    def _hits_to_docs(self, hits: list) -> list[Document]:
+        """将 Milvus 搜索结果转为 LangChain Document 列表。"""
+        from src.database import get_chunk
+
         docs = []
-        for hit in results[0]:
+        for hit in hits:
             entity = hit.get("entity", {})
             score = hit.get("distance", 0)
             chunk_id = entity.get("chunk_id", "")
@@ -320,11 +353,6 @@ class MilvusStore(VectorStore):
             source = entity.get("source", "")
             page = entity.get("page", 0)
             section = entity.get("section", "")
-
-            logger.debug("  hit: %s P%s type=%s score=%.4f id=%s", source, page, chunk_type, score, chunk_id)
-
-            # 从 PG 读取原文
-            from src.database import get_chunk
 
             chunk = get_chunk(chunk_id)
             content = chunk["content"] if chunk else ""
@@ -348,6 +376,10 @@ class MilvusStore(VectorStore):
         logger.info("检索完成: 返回 %d 个文档块", len(docs))
         return docs
 
+    # ═══════════════════════════════════════════════════════════════
+    # 检索器工厂
+    # ═══════════════════════════════════════════════════════════════
+
     def as_retriever(self, **kwargs):
         from langchain_core.retrievers import BaseRetriever
 
@@ -360,6 +392,23 @@ class MilvusStore(VectorStore):
 
         return _Retriever()
 
+    def as_hybrid_retriever(self, **kwargs):
+        """返回使用混合检索（BM25 + Dense）的 retriever。"""
+        from langchain_core.retrievers import BaseRetriever
+
+        store = self
+
+        class _HybridRetriever(BaseRetriever):
+            def _get_relevant_documents(self, query: str, **kw):
+                k = kw.pop("k", settings.hybrid_retrieval_top_k)
+                return store.hybrid_search(query, k=k, **kw)
+
+        return _HybridRetriever()
+
+
+# ═══════════════════════════════════════════════════════════════
+# 模块级单例
+# ═══════════════════════════════════════════════════════════════
 
 _store: MilvusStore | None = None
 
@@ -377,10 +426,8 @@ def add_documents_to_store(documents: list[Document]) -> None:
     try:
         store = get_vector_store()
 
-        # 1. 文本分块入库
         store.add_documents(documents)
 
-        # 2. 图片管线：第一阶段 — 提取 + 写占位
         if settings.enable_image_understanding:
             from src.image_pipeline import save_image_placeholders, fill_image_descriptions
 
@@ -398,7 +445,6 @@ def add_documents_to_store(documents: list[Document]) -> None:
                 except Exception:
                     logger.exception("图片占位写入失败: %s", source)
 
-            # 第二阶段：并发生成描述 + UPDATE
             if all_records:
                 fill_image_descriptions(all_records)
 
@@ -408,5 +454,13 @@ def add_documents_to_store(documents: list[Document]) -> None:
 
 
 def get_retriever():
+    """返回默认 retriever。"""
     store = get_vector_store()
+    if settings.hybrid_enabled:
+        return store.as_hybrid_retriever()
     return store.as_retriever()
+
+
+def get_hybrid_retriever():
+    """显式返回混合检索器。"""
+    return get_vector_store().as_hybrid_retriever()

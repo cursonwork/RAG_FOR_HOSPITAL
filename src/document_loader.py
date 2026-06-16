@@ -53,6 +53,10 @@ def load_pdf_opendataloader(file_path: str) -> Document | None:
                 "num_pages": j.get("number of pages", 0),
                 "creation_date": j.get("creation date", ""),
             })
+            # 将结构化元素列表传给分块器，实现 section-aware 分块
+            kids = j.get("kids", [])
+            if kids:
+                metadata["odl_elements"] = kids
         except (json.JSONDecodeError, KeyError):
             logger.debug("JSON 元数据解析失败: %s", file_name)
 

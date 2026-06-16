@@ -40,12 +40,24 @@ class Settings(BaseSettings):
     # PDF parser: "opendataloader" | "pymupdf"
     pdf_parser: str = "opendataloader"
 
-    # Chunking
-    chunk_size: int = 512
-    chunk_overlap: int = 50
+    # Chunking — 2000 字符约等于 2-3 个完整英文段落，保证医学语义完整
+    chunk_size: int = 2000
+    chunk_overlap: int = 100
 
     # Retrieval
-    retrieval_top_k: int = 3
+    retrieval_top_k: int = 5  # 最终返回给 LLM 的文档数
+
+    # Hybrid search (Milvus 2.5+ native BM25)
+    hybrid_enabled: bool = True
+    hybrid_retrieval_top_k: int = 20  # BM25 + Dense 初筛数量
+
+    # Reranker (FlashRank cross-encoder, CPU-friendly)
+    reranker_enabled: bool = True
+    reranker_model: str = "ms-marco-MiniLM-L-6-v2"
+    reranker_top_n: int = 5
+
+    # Query rewriting
+    query_rewriting_enabled: bool = True
 
     # Image understanding
     enable_image_understanding: bool = True
