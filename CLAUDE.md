@@ -165,7 +165,12 @@ images    (id VARCHAR(64) PK, chunk_id FK→chunks, image_data BYTEA, image_form
 | `Dockerfile` | Python 3.13 + Java 17 + 项目依赖 | — |
 | `docker-compose.yml` | etcd + minio + milvus + pg + app 全家桶 | — |
 | `scripts/annotate_chunks.py` | 分块标注 PDF 生成器：彩色块叠加原 PDF + 图例页 | — |
-| `scripts/eval_retrieval.py` | 检索评估脚本：baseline vs hybrid vs hybrid+rerank 三线对比 | — |
+| `src/evaluation/` | **RAG 全面评估框架**：105 QA 数据集 + 检索/生成/端到端指标 | `EvalItem`, `compute_retrieval_metrics()`, `run_full_evaluation()` |
+| `src/evaluation/dataset.py` | 105 条手工标注 QA 对（7 论文 × 15 题，6 类型 × 3 难度） | `DATASET`, `get_dataset()`, `dataset_stats()` |
+| `src/evaluation/metrics.py` | 检索指标(R@k/P@k/NDCG/MRR/MAP/Hit) + 生成指标(LLM-as-judge) + 端到端(ROUGE/BLEU/KW) | `compute_retrieval_metrics()`, `compute_generation_metrics()`, `compute_e2e_metrics()` |
+| `src/evaluation/runner.py` | 评估编排器：全链路评估 + 报告生成 + 管线对比 + 切片分析 | `run_full_evaluation()`, `generate_report()`, `compare_pipelines()` |
+| `scripts/eval_retrieval.py` | 旧检索评估脚本：baseline vs hybrid vs hybrid+rerank 三线对比（保留作为快速检查） | — |
+| `scripts/run_full_evaluation.py` | **新全面评估脚本**：`--compare` 对比 / `--retrieval-only` / `--slices` 切片 | — |
 | `.streamlit/config.toml` | 禁用文件监控 | `fileWatcherType = "none"` |
 
 ---
@@ -179,8 +184,9 @@ images    (id VARCHAR(64) PK, chunk_id FK→chunks, image_data BYTEA, image_form
 5. **依赖**: `uv sync`
 6. **导入文档**: `uv run python main.py ingest --path data/documents/ --clear`
 7. **评估检索**: `uv run python scripts/eval_retrieval.py`
-8. **CLI 问答**: `uv run python main.py ask --question "你的问题"`
-9. **启动 Web**: `uv run python main.py serve` → http://localhost:8501
+8. **全面评估**: `uv run python scripts/run_full_evaluation.py --compare`（105 QA 对，三管线对比+切片分析）
+9. **CLI 问答**: `uv run python main.py ask --question "你的问题"`
+10. **启动 Web**: `uv run python main.py serve` → http://localhost:8501
 
 ---
 

@@ -12,10 +12,13 @@ wheels/
 # Environment & secrets
 .env
 
-# Milvus data
+# Generated data
 data/vector_db/
-# User documents
 data/documents/
+data/*_full.txt
+data/*_chunk_annotation.pdf
+data/all/
+data/eval_results/
 
 # Hugging Face models
 models/
