@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com/v1"
     deepseek_model: str = "deepseek-chat"
 
+    # DashScope (Qwen 多模态)
+    dashscope_api_key: str = ""
+    dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    dashscope_model: str = "qwen3.7-plus"
+
     # Ollama Embedding
     ollama_base_url: str = "http://localhost:11434/v1"
     embedding_model_name: str = "bge-m3"
@@ -32,12 +37,31 @@ class Settings(BaseSettings):
     pg_user: str = "postgres"
     pg_password: str = "postgres"
 
-    # Chunking
-    chunk_size: int = 512
-    chunk_overlap: int = 50
+    # PDF parser: "opendataloader" | "pymupdf"
+    pdf_parser: str = "opendataloader"
+
+    # Chunking — 2000 字符约等于 2-3 个完整英文段落，保证医学语义完整
+    chunk_size: int = 2000
+    chunk_overlap: int = 100
 
     # Retrieval
-    retrieval_top_k: int = 3
+    retrieval_top_k: int = 5  # 最终返回给 LLM 的文档数
+
+    # Hybrid search (Milvus 2.5+ native BM25)
+    hybrid_enabled: bool = True
+    hybrid_retrieval_top_k: int = 20  # BM25 + Dense 初筛数量
+
+    # Reranker (FlashRank cross-encoder, CPU-friendly)
+    reranker_enabled: bool = True
+    reranker_model: str = "ms-marco-MiniLM-L-6-v2"
+    reranker_top_n: int = 5
+
+    # Query rewriting
+    query_rewriting_enabled: bool = True
+
+    # Image understanding
+    enable_image_understanding: bool = True
+    image_max_size: int = 800
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

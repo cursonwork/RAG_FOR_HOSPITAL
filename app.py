@@ -1,3 +1,4 @@
+import re
 import tempfile
 import uuid
 from pathlib import Path
@@ -9,52 +10,164 @@ from src.chat_history import PostgresChatMessageHistory
 from src.config import settings
 from src.conversation import create_conversational_chain
 from src.database import (
+    count_chunks,
     create_session,
     delete_session,
+    get_chunk,
+    get_image,
     get_or_create_user,
     list_user_sessions,
-    update_session_mode,
 )
 from src.document_loader import load_pdf
 from src.logger import get_logger
-from src.vector_store import add_documents_to_store
+from src.vector_store import add_documents_to_store, get_retriever
 
 logger = get_logger("app")
 
 st.set_page_config(page_title="医疗RAG系统", page_icon="🏥", layout="wide")
 
-# ── 样式 ──
+# ── 样式（hover 引用浮窗） ──
 st.markdown("""
 <style>
-    .stChatMessage { padding: 1rem; border-radius: 10px; margin-bottom: 0.5rem; }
+    .citation {
+        display: inline;
+        position: relative;
+        cursor: help;
+        border-bottom: 1px dotted #aaa;
+    }
+    .citation .tooltip {
+        display: none;
+        position: absolute;
+        bottom: 28px;
+        left: 50%%;
+        transform: translateX(-50%%);
+        background: #1e1e1e;
+        color: #f0f0f0;
+        padding: 10px 14px;
+        border-radius: 8px;
+        font-size: 0.85rem;
+        max-width: 420px;
+        white-space: pre-wrap;
+        word-break: break-word;
+        z-index: 9999;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+        line-height: 1.5;
+    }
+    .citation:hover .tooltip {
+        display: block;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# ── 会话状态初始化 ──
+# ── 会话状态 ──
 _defaults = {
     "username": "",
     "user_id": None,
     "session_id": None,
     "messages": [],
-    "mode": "medical_qa",
     "chain": None,
-    "doc_count": 0,
+    # 当前轮次的检索结果映射
+    "citation_map": {},    # chunk_id → {content, source, page, section}
+    "image_map": {},       # image_id → {image_data, image_format, description, caption, source, page}
+    "image_index": {},     # [图N] → image_id
 }
 for _key, _val in _defaults.items():
     if _key not in st.session_state:
         st.session_state[_key] = _val
 
-MODE_EMOJI = {"medical_qa": "🩺", "drug_query": "💊", "diagnosis": "🩻"}
-
 
 def _load_messages_from_db(session_id: str) -> list[dict]:
-    """从 PostgreSQL 加载会话消息，转为 Streamlit 展示格式。"""
     history = PostgresChatMessageHistory(session_id=session_id)
     msgs = []
     for m in history.messages:
         role = "user" if m.type == "human" else "assistant"
         msgs.append({"role": role, "content": m.content})
     return msgs
+
+
+def _pre_retrieve(question: str, top_k: int = 5) -> None:
+    """（已废弃）保留仅为向后兼容。使用 _build_citation_maps 代替。"""
+    pass
+
+
+def _build_citation_maps(docs: list) -> None:
+    """从检索到的文档列表构建引用映射和图片映射，供 UI 渲染使用。
+
+    在 chain.invoke 之后调用，避免重复检索。
+    """
+    citation_map = {}
+    image_map = {}
+    image_index = {}
+
+    text_idx = 0
+    img_idx = 0
+
+    for doc in docs:
+        chunk_id = doc.metadata.get("chunk_id", "")
+        image_id = doc.metadata.get("image_id", "")
+        chunk_type = doc.metadata.get("chunk_type", "text")
+
+        if chunk_type == "image" and image_id:
+            img_idx += 1
+            img_info = get_image(image_id)
+            if img_info:
+                image_map[image_id] = img_info
+                image_index[str(img_idx)] = image_id
+        elif chunk_id:
+            text_idx += 1
+            chunk = get_chunk(chunk_id)
+            if chunk:
+                citation_map[chunk_id] = {
+                    "content": chunk["content"],
+                    "source": chunk["source"],
+                    "page": chunk["page"],
+                    "section": chunk.get("section_title", ""),
+                    "index": text_idx,
+                }
+
+    st.session_state.citation_map = citation_map
+    st.session_state.image_map = image_map
+    st.session_state.image_index = image_index
+
+
+def _render_citations(text: str) -> str:
+    """后处理：文献引用 → hover 浮窗。图片引用收集到 session_state 稍后渲染。"""
+    def _cite_replacer(match):
+        num = match.group(1)
+        for cid, info in st.session_state.citation_map.items():
+            if str(info.get("index", "")) == num:
+                src = info.get("source", "未知")
+                page = info.get("page", "")
+                section = info.get("section", "")
+                content = info.get("content", "")
+                preview = content[:300] + ("..." if len(content) > 300 else "")
+                page_str = f" 第{page}页" if page else ""
+                section_str = f" | {section}" if section else ""
+                tooltip = f"{src}{page_str}{section_str}\n\n{preview}"
+                tooltip = tooltip.replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
+                return (
+                    f'<span class="citation">[文献{num}] 来源: {src}{page_str}{section_str}'
+                    f'<span class="tooltip">{tooltip}</span></span>'
+                )
+        return match.group(0)
+
+    return re.sub(r"\[文献(\d+)\]", _cite_replacer, text)
+
+
+def _render_images_after_answer(text: str) -> None:
+    """在 markdown 后面渲染匹配到的图片。"""
+    for num, img_id in st.session_state.image_index.items():
+        if f"[图{num}]" in text:
+            img_info = st.session_state.image_map.get(img_id)
+            if img_info and img_info.get("image_data"):
+                try:
+                    st.image(
+                        img_info["image_data"],
+                        caption=f"[图{num}] 来源: {img_info['source']} 第{img_info['page']}页 | {img_info.get('description', '')[:100]}",
+                        use_container_width=True,
+                    )
+                except Exception:
+                    logger.exception("渲染图片失败 [图%s]", num)
 
 
 # ═══════════════════════════════════════════
@@ -75,10 +188,10 @@ with st.sidebar:
         st.session_state.username = username
         st.session_state.user_id = get_or_create_user(username)
         new_id = uuid.uuid4().hex[:16]
-        create_session(new_id, st.session_state.user_id, st.session_state.mode)
+        create_session(new_id, st.session_state.user_id)
         st.session_state.session_id = new_id
         st.session_state.messages = []
-        st.session_state.chain = create_conversational_chain(st.session_state.mode)
+        st.session_state.chain = create_conversational_chain()
         logger.info("用户登录: %s (user_id=%d, session=%s)",
                     username, st.session_state.user_id, new_id)
         st.rerun()
@@ -94,10 +207,10 @@ with st.sidebar:
 
     if st.button("➕ 新建会话", use_container_width=True):
         new_id = uuid.uuid4().hex[:16]
-        create_session(new_id, st.session_state.user_id, st.session_state.mode)
+        create_session(new_id, st.session_state.user_id)
         st.session_state.session_id = new_id
         st.session_state.messages = []
-        st.session_state.chain = create_conversational_chain(st.session_state.mode)
+        st.session_state.chain = create_conversational_chain()
         st.rerun()
 
     sessions = list_user_sessions(st.session_state.user_id)
@@ -110,22 +223,20 @@ with st.sidebar:
         if len(label) > 22:
             label = label[:22] + "..."
 
-        emoji = MODE_EMOJI.get(mode, "")
         ts = updated_at.strftime("%m-%d %H:%M")
 
         col_btn, col_del = st.columns([6, 1])
         with col_btn:
             btn_type = "primary" if is_active else "secondary"
             if st.button(
-                f"{emoji} {label}  — {ts}",
+                f"{label}  — {ts}",
                 key=f"sess_{sid}",
                 type=btn_type,
                 use_container_width=True,
             ):
                 st.session_state.session_id = sid
-                st.session_state.mode = mode
                 st.session_state.messages = _load_messages_from_db(sid)
-                st.session_state.chain = create_conversational_chain(mode)
+                st.session_state.chain = create_conversational_chain()
                 st.rerun()
         with col_del:
             if st.button("🗑️", key=f"del_{sid}", help="删除此会话"):
@@ -134,19 +245,13 @@ with st.sidebar:
                     remaining = list_user_sessions(st.session_state.user_id)
                     if remaining:
                         st.session_state.session_id = remaining[0][0]
-                        st.session_state.mode = remaining[0][1]
-                        st.session_state.messages = _load_messages_from_db(
-                            remaining[0][0]
-                        )
+                        st.session_state.messages = _load_messages_from_db(remaining[0][0])
                     else:
                         new_id = uuid.uuid4().hex[:16]
-                        create_session(new_id, st.session_state.user_id, "medical_qa")
+                        create_session(new_id, st.session_state.user_id)
                         st.session_state.session_id = new_id
                         st.session_state.messages = []
-                        st.session_state.mode = "medical_qa"
-                    st.session_state.chain = create_conversational_chain(
-                        st.session_state.mode
-                    )
+                    st.session_state.chain = create_conversational_chain()
                 st.rerun()
 
     st.divider()
@@ -170,25 +275,22 @@ with st.sidebar:
                     st.write(f"📄 解析: {uf.name}")
                     logger.info("上传文件: %s (%.1f KB)", uf.name, uf.size / 1024)
                     suffix = Path(uf.name).suffix or ".pdf"
-                    with tempfile.NamedTemporaryFile(
-                        delete=False, suffix=suffix
-                    ) as tmp:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                         tmp.write(uf.read())
-                        docs = load_pdf(tmp.name)
-                        all_docs.extend(docs)
+                        doc = load_pdf(tmp.name)
+                        if doc is not None:
+                            all_docs.append(doc)
                     Path(tmp.name).unlink(missing_ok=True)
 
-                st.write(f"🔢 共 {len(all_docs)} 页，正在分块写入向量库...")
-                logger.info("共提取 %d 页，开始入库", len(all_docs))
+                st.write(f"🔢 共 {len(all_docs)} 个文档，正在分块写入向量库...")
+                logger.info("共加载 %d 个文档，开始入库", len(all_docs))
                 try:
                     add_documents_to_store(all_docs)
-                    st.session_state.doc_count += len(all_docs)
-                    st.session_state.chain = create_conversational_chain(
-                        st.session_state.mode
-                    )
-                    logger.info("Web 导入完成，知识库共 %d 页", st.session_state.doc_count)
+                    st.session_state.chain = create_conversational_chain()
+                    total = count_chunks()
+                    logger.info("Web 导入完成，知识库共 %d 个分块", total)
                     status.update(
-                        label=f"✅ 导入完成！共处理 {len(all_docs)} 页文档",
+                        label=f"✅ 导入完成！共 {total} 个分块",
                         state="complete",
                     )
                 except Exception:
@@ -196,52 +298,46 @@ with st.sidebar:
                     st.error("导入失败，请查看日志 logs/app.log")
 
     st.divider()
-    st.metric("已索引文档页数", st.session_state.doc_count)
+    try:
+        total_chunks = count_chunks()
+    except Exception:
+        total_chunks = 0
+    st.metric("已索引分块数", total_chunks)
 
     st.divider()
+    st.caption(f"PDF解析: {settings.pdf_parser}")
     st.caption(f"Embedding: {settings.embedding_model_name}")
     st.caption(f"LLM: {settings.deepseek_model}")
+    st.caption(f"图片理解: {'on' if settings.enable_image_understanding else 'off'} ({settings.dashscope_model})")
     st.caption("向量库: Milvus | 会话: PostgreSQL")
+    st.caption("意图识别: automatic")
 
 # ═══════════════════════════════════════════
 # 主区域：对话界面
 # ═══════════════════════════════════════════
 
-mode_labels = {
-    "medical_qa": ("🩺 医疗问答", "tag-qa"),
-    "drug_query": ("💊 药物查询", "tag-drug"),
-    "diagnosis": ("🩻 辅助诊断", "tag-diag"),
-}
-
-cols = st.columns(len(mode_labels))
-for i, (mode_key, (label, _)) in enumerate(mode_labels.items()):
-    with cols[i]:
-        is_active = st.session_state.mode == mode_key
-        btn_type = "primary" if is_active else "secondary"
-        if st.button(label, key=f"mode_{mode_key}", type=btn_type, use_container_width=True):
-            if st.session_state.mode != mode_key:
-                logger.info("切换模式: %s -> %s", st.session_state.mode, mode_key)
-                st.session_state.mode = mode_key
-                if st.session_state.session_id:
-                    update_session_mode(st.session_state.session_id, mode_key)
-                st.session_state.chain = create_conversational_chain(mode_key)
-                st.rerun()
+st.header("🏥 医疗 RAG 智能问答")
+st.caption("系统自动识别问题类型（医疗问答 / 药物查询 / 辅助诊断），无需手动切换")
 
 st.divider()
 
 # ── 消息展示 ──
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+        if msg["role"] == "assistant":
+            # 渲染带 hover 引用的回答
+            st.markdown(msg.get("raw_content", msg["content"]), unsafe_allow_html=True)
+        else:
+            st.markdown(msg["content"])
 
 # ── 输入区 ──
 if question := st.chat_input("请输入您的医疗问题..."):
-    logger.info("用户提问 (user=%s, mode=%s, session=%s): %s",
-                st.session_state.username, st.session_state.mode,
+    logger.info("用户提问 (user=%s, session=%s): %s",
+                st.session_state.username,
                 st.session_state.session_id, question[:200])
 
     if st.session_state.chain is None:
-        st.session_state.chain = create_conversational_chain(st.session_state.mode)
+        st.session_state.chain = create_conversational_chain()
 
     st.chat_message("user").markdown(question)
     st.session_state.messages.append({"role": "user", "content": question})
@@ -257,11 +353,22 @@ if question := st.chat_input("请输入您的医疗问题..."):
                     },
                 )
                 logger.info("生成回答: %d 字符", len(result))
-                logger.debug("回答内容: %s", result[:500])
-                st.markdown(result)
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": result}
-                )
+
+                # 从最近一次检索构建引用映射（避免重复检索）
+                from src.rag_chain import get_last_retrieved_docs
+                _build_citation_maps(get_last_retrieved_docs())
+
+                # 后处理：hover 引用
+                rendered = _render_citations(result)
+                st.markdown(rendered, unsafe_allow_html=True)
+                # 渲染匹配到的图片
+                _render_images_after_answer(result)
+
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": result,
+                    "raw_content": rendered,
+                })
             except Exception as e:
                 logger.exception("问答异常")
                 st.error(f"出错了：{e}")
