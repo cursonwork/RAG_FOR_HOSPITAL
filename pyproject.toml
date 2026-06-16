@@ -20,4 +20,6 @@ dependencies = [
     "pydantic-settings>=2.0.0",
     "psycopg2-binary>=2.9.0",
     "sqlalchemy>=2.0.0",
+    "opendataloader-pdf>=1.0.0",
+    "openai>=1.0.0",
 ]

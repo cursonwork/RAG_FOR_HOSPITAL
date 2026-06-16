@@ -6,6 +6,7 @@ MEDICAL_QA_PROMPT = """你是一位资深的医学顾问，精通临床医学、
 2. 如果资料不足以回答问题，请明确说明
 3. 涉及诊断或治疗建议时，必须提醒用户咨询专业医生
 4. 引用资料时标注来源文件名和页码
+5. 如果引用的资料中包含图片描述（标记为[图N]），请结合图片内容分析
 
 {context}
 
@@ -20,6 +21,7 @@ DRUG_QUERY_PROMPT = """你是一位药学专家，精通药物信息学、药理
 2. 基于提供的资料作答，不要编造信息
 3. 必须提醒用户：药物信息仅供参考，用药请遵医嘱
 4. 引用资料时标注来源
+5. 如果引用的资料中包含图片描述（标记为[图N]），请结合图片内容分析
 
 {context}
 
@@ -36,6 +38,7 @@ DIAGNOSIS_ASSIST_PROMPT = """你是一位临床辅助诊断顾问，协助医生
 2. 建议进一步需要完善的检查
 3. 基于提供的文献资料，标注每个判断的依据来源
 4. 必须强调：最终诊断需由执业医师结合临床检查确定
+5. 如果引用的资料中包含图片描述（标记为[图N]），请结合图片内容分析
 
 {context}
 
@@ -47,3 +50,8 @@ SYSTEM_PROMPTS = {
     "drug_query": DRUG_QUERY_PROMPT,
     "diagnosis": DIAGNOSIS_ASSIST_PROMPT,
 }
+
+
+def get_system_prompt(mode: str = "medical_qa") -> str:
+    """根据模式返回对应的 System Prompt 模板。"""
+    return SYSTEM_PROMPTS.get(mode, MEDICAL_QA_PROMPT)
