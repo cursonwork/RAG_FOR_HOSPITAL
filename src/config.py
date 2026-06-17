@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     # Milvus (Docker)
     milvus_host: str = "localhost"
     milvus_port: int = 19530
+    milvus_collection_name: str = "hospital_knowledge"
+    embedding_dimension: int = 1024
 
     # PostgreSQL (Docker)
     pg_host: str = "localhost"
@@ -59,9 +61,11 @@ class Settings(BaseSettings):
     # Query rewriting
     query_rewriting_enabled: bool = True
 
-    # Image understanding
+    # Image understanding (PyMuPDF 提取图片 → Qwen 多模态描述)
     enable_image_understanding: bool = True
     image_max_size: int = 800
+    image_max_concurrent: int = 8
+    image_min_bytes: int = 5120  # 5KB，过滤噪声小图
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

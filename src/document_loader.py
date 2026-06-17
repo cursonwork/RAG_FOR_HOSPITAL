@@ -12,6 +12,43 @@ from src.logger import get_logger
 logger = get_logger(__name__)
 
 
+# ═══════════════════════════════════════════════════════════════
+# Markdown Loader（非 PDF 数据入口）
+# ═══════════════════════════════════════════════════════════════
+
+
+def load_markdown(file_path: str) -> Document:
+    """加载单个 Markdown 文件为 LangChain Document。
+
+    不设置 odl_elements，让文本分流到 _split_by_markdown() 分块器。
+    """
+    md_text = Path(file_path).read_text(encoding="utf-8")
+    file_name = Path(file_path).name
+    logger.debug("加载 Markdown: %s (%d 字符)", file_name, len(md_text))
+    return Document(
+        page_content=md_text,
+        metadata={
+            "source": file_name,
+            "file_path": file_path,
+            "parser": "markdown-loader",
+        },
+    )
+
+
+def load_markdown_files(file_paths: list[str]) -> list[Document]:
+    """批量加载 Markdown 文件。"""
+    logger.info("批量加载 %d 个 Markdown 文件", len(file_paths))
+    docs: list[Document] = []
+    for path in file_paths:
+        try:
+            doc = load_markdown(path)
+            docs.append(doc)
+        except Exception:
+            logger.exception("加载 Markdown 失败: %s", path)
+    logger.info("Markdown 加载完成，共 %d 个文档", len(docs))
+    return docs
+
+
 def load_pdf_opendataloader(file_path: str) -> Document | None:
     """使用 opendataloader-pdf 将 PDF 转为结构化 Markdown + JSON 元数据。"""
     import opendataloader_pdf
@@ -47,12 +84,14 @@ def load_pdf_opendataloader(file_path: str) -> Document | None:
     if json_path.exists():
         try:
             j = json.loads(json_path.read_text(encoding="utf-8"))
-            metadata.update({
-                "author": j.get("author") or "",
-                "title": j.get("title") or "",
-                "num_pages": j.get("number of pages", 0),
-                "creation_date": j.get("creation date", ""),
-            })
+            metadata.update(
+                {
+                    "author": j.get("author") or "",
+                    "title": j.get("title") or "",
+                    "num_pages": j.get("number of pages", 0),
+                    "creation_date": j.get("creation date", ""),
+                }
+            )
             # 将结构化元素列表传给分块器，实现 section-aware 分块
             kids = j.get("kids", [])
             if kids:

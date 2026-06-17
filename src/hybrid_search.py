@@ -9,9 +9,10 @@
     docs = hr.hybrid_search("query", k=20)
 """
 
+import threading
+
 from langchain_core.documents import Document
 
-from src.config import settings
 from src.logger import get_logger
 
 logger = get_logger(__name__)
@@ -26,9 +27,10 @@ class BM25SparseRetriever:
 
     def _build_index(self) -> None:
         """从 PG 加载所有文本 chunk 并构建 BM25 索引。"""
-        from src.database import get_engine
-        from sqlalchemy import text
         from rank_bm25 import BM25Okapi
+        from sqlalchemy import text
+
+        from src.database import get_engine
 
         engine = get_engine()
         with engine.connect() as conn:
@@ -46,10 +48,7 @@ class BM25SparseRetriever:
             return
 
         # 分词：按空格简单切分（英文医学文本适用）
-        tokenized = [
-            (c["content"] or "").lower().split()
-            for c in self._chunks
-        ]
+        tokenized = [(c["content"] or "").lower().split() for c in self._chunks]
         self._bm25 = BM25Okapi(tokenized)
         logger.info("BM25 索引构建: %d 个 chunk", len(self._chunks))
 
@@ -66,33 +65,37 @@ class BM25SparseRetriever:
         indexed = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)[:k]
 
         docs = []
-        max_s = indexed[0][1] if indexed else 1.0
         for idx, score in indexed:
             if score <= 0:
                 continue
             chunk = self._chunks[idx]
-            docs.append(Document(
-                page_content=chunk["content"],
-                metadata={
-                    "chunk_id": chunk["id"],
-                    "source": chunk["source"],
-                    "page": chunk["page"],
-                    "section": chunk.get("section_title", ""),
-                    "chunk_type": chunk.get("chunk_type", "text"),
-                    "bm25_score": round(float(score), 4),
-                },
-            ))
+            docs.append(
+                Document(
+                    page_content=chunk["content"],
+                    metadata={
+                        "chunk_id": chunk["id"],
+                        "source": chunk["source"],
+                        "page": chunk["page"],
+                        "section": chunk.get("section_title", ""),
+                        "chunk_type": chunk.get("chunk_type", "text"),
+                        "bm25_score": round(float(score), 4),
+                    },
+                )
+            )
 
         return docs
 
 
 _bm25_retriever: BM25SparseRetriever | None = None
+_bm25_lock = threading.Lock()
 
 
 def get_bm25_retriever() -> BM25SparseRetriever:
     global _bm25_retriever
     if _bm25_retriever is None:
-        _bm25_retriever = BM25SparseRetriever()
+        with _bm25_lock:
+            if _bm25_retriever is None:
+                _bm25_retriever = BM25SparseRetriever()
     return _bm25_retriever
 
 
@@ -158,7 +161,9 @@ def hybrid_search(
 
     logger.debug(
         "混合检索: dense=%d sparse=%d → RRF fusion → %d",
-        len(dense_docs), len(sparse_docs), min(k_final, len(dense_docs) + len(sparse_docs)),
+        len(dense_docs),
+        len(sparse_docs),
+        min(k_final, len(dense_docs) + len(sparse_docs)),
     )
 
     return _rrf_fusion(dense_docs, sparse_docs, top_k=k_final)

@@ -9,18 +9,20 @@
 import math
 import statistics
 from collections import defaultdict
+from contextlib import suppress
 from dataclasses import dataclass, field
 
 from langchain_core.documents import Document
-
 
 # ═══════════════════════════════════════════════════════════════
 # Data classes
 # ═══════════════════════════════════════════════════════════════
 
+
 @dataclass
 class RetrievalMetrics:
     """检索指标结果。"""
+
     recall_at_k: dict[int, float] = field(default_factory=dict)
     precision_at_k: dict[int, float] = field(default_factory=dict)
     ndcg_at_k: dict[int, float] = field(default_factory=dict)
@@ -37,6 +39,7 @@ class RetrievalMetrics:
 @dataclass
 class GenerationMetrics:
     """生成质量指标结果（LLM-as-judge）。"""
+
     faithfulness: float = 0.0  # 生成回答对检索上下文的忠实度
     answer_relevance: float = 0.0  # 回答与问题的相关性
     context_relevance: float = 0.0  # 检索上下文与问题的相关性
@@ -47,6 +50,7 @@ class GenerationMetrics:
 @dataclass
 class EndToEndMetrics:
     """端到端回答质量指标。"""
+
     rouge_l_precision: float = 0.0
     rouge_l_recall: float = 0.0
     rouge_l_f1: float = 0.0
@@ -61,6 +65,7 @@ class EndToEndMetrics:
 @dataclass
 class FullEvalResult:
     """完整评估结果。"""
+
     retrieval: RetrievalMetrics = field(default_factory=RetrievalMetrics)
     generation: GenerationMetrics | None = None  # None 表示未运行 LLM 评估
     e2e: EndToEndMetrics = field(default_factory=EndToEndMetrics)
@@ -72,18 +77,15 @@ class FullEvalResult:
 # 1. 检索指标
 # ═══════════════════════════════════════════════════════════════
 
-def _is_relevant(doc: Document, relevant_phrases: list[str],
-                 relevant_sections: list[str]) -> bool:
+
+def _is_relevant(doc: Document, relevant_phrases: list[str], relevant_sections: list[str]) -> bool:
     """判定单个文档是否与查询相关。"""
     content = doc.page_content.lower()
     for phrase in relevant_phrases:
         if phrase.lower() in content:
             return True
     section = (doc.metadata.get("section") or "").lower()
-    for sec in relevant_sections:
-        if sec.lower() in section:
-            return True
-    return False
+    return any(sec.lower() in section for sec in relevant_sections)
 
 
 def _dcg(rels: list[int], k: int) -> float:
@@ -114,10 +116,10 @@ def _average_precision(rels: list[int]) -> float:
     return ap / num_relevant
 
 
-def _bootstrap_ci(data: list[float], n_bootstrap: int = 2000,
-                  ci: float = 0.95) -> tuple[float, float]:
+def _bootstrap_ci(data: list[float], n_bootstrap: int = 2000, ci: float = 0.95) -> tuple[float, float]:
     """Bootstrap 95% 置信区间（百分位法）。"""
     import random
+
     n = len(data)
     if n < 3:
         return (0, 0)
@@ -157,30 +159,28 @@ def compute_retrieval_metrics(
         except Exception:
             docs = []
 
-        rels = [
-            1 if _is_relevant(d, item.relevant_phrases, item.relevant_sections)
-            else 0
-            for d in docs[:k_max]
-        ]
+        rels = [1 if _is_relevant(d, item.relevant_phrases, item.relevant_sections) else 0 for d in docs[:k_max]]
         all_rels.append(rels)
         all_precisions_for_map.append(_average_precision(rels))
 
-        result.per_query.append({
-            "id": item.id,
-            "query": item.question[:100],
-            "paper": item.paper_source,
-            "type": item.question_type,
-            "difficulty": item.difficulty,
-            "rels": rels,
-            "relevant@5": sum(rels[:5]),
-            "relevant@10": sum(rels[:10]),
-        })
+        result.per_query.append(
+            {
+                "id": item.id,
+                "query": item.question[:100],
+                "paper": item.paper_source,
+                "type": item.question_type,
+                "difficulty": item.difficulty,
+                "rels": rels,
+                "relevant@5": sum(rels[:5]),
+                "relevant@10": sum(rels[:10]),
+            }
+        )
 
     # ── Per-k metrics ──
     for k in k_values:
         recalls, precisions, ndcgs, hits = [], [], [], []
 
-        for i, item in enumerate(queries):
+        for i, _item in enumerate(queries):
             rels_k = all_rels[i][:k]
             retrieved_relevant = sum(rels_k)
             total_relevant = max(retrieved_relevant, 1)
@@ -281,10 +281,8 @@ def _parse_llm_score(response: str) -> tuple[float, str]:
     reason = ""
     for line in response.strip().split("\n"):
         if line.upper().startswith("SCORE:"):
-            try:
+            with suppress(ValueError):
                 score = float(line.split(":", 1)[1].strip())
-            except ValueError:
-                pass
         if line.upper().startswith("REASON:"):
             reason = line.split(":", 1)[1].strip()
     return max(0.0, min(1.0, score)), reason
@@ -329,9 +327,7 @@ def compute_generation_metrics(
             continue
 
         # Faithfulness
-        prompt_f = FAITHFULNESS_PROMPT.format(
-            question=item.question, context=context[:4000], answer=answer[:2000]
-        )
+        prompt_f = FAITHFULNESS_PROMPT.format(question=item.question, context=context[:4000], answer=answer[:2000])
         try:
             resp_f = llm.invoke(prompt_f)
             score_f, reason_f = _parse_llm_score(resp_f.content)
@@ -339,9 +335,7 @@ def compute_generation_metrics(
             score_f, reason_f = 0.0, "eval failed"
 
         # Answer Relevance
-        prompt_ar = ANSWER_RELEVANCE_PROMPT.format(
-            question=item.question, answer=answer[:2000]
-        )
+        prompt_ar = ANSWER_RELEVANCE_PROMPT.format(question=item.question, answer=answer[:2000])
         try:
             resp_ar = llm.invoke(prompt_ar)
             score_ar, reason_ar = _parse_llm_score(resp_ar.content)
@@ -349,9 +343,7 @@ def compute_generation_metrics(
             score_ar, reason_ar = 0.0, "eval failed"
 
         # Context Relevance
-        prompt_cr = CONTEXT_RELEVANCE_PROMPT.format(
-            question=item.question, context=context[:4000]
-        )
+        prompt_cr = CONTEXT_RELEVANCE_PROMPT.format(question=item.question, context=context[:4000])
         try:
             resp_cr = llm.invoke(prompt_cr)
             score_cr, reason_cr = _parse_llm_score(resp_cr.content)
@@ -362,24 +354,24 @@ def compute_generation_metrics(
         ar_scores.append(score_ar)
         cr_scores.append(score_cr)
 
-        result.per_query.append({
-            "id": item.id,
-            "faithfulness": score_f,
-            "answer_relevance": score_ar,
-            "context_relevance": score_cr,
-            "faithfulness_reason": reason_f,
-            "ar_reason": reason_ar,
-            "cr_reason": reason_cr,
-        })
+        result.per_query.append(
+            {
+                "id": item.id,
+                "faithfulness": score_f,
+                "answer_relevance": score_ar,
+                "context_relevance": score_cr,
+                "faithfulness_reason": reason_f,
+                "ar_reason": reason_ar,
+                "cr_reason": reason_cr,
+            }
+        )
 
     if f_scores:
         result.faithfulness = round(statistics.mean(f_scores), 4)
         result.answer_relevance = round(statistics.mean(ar_scores), 4)
         result.context_relevance = round(statistics.mean(cr_scores), 4)
         # 幻觉率 = 与上下文不符的陈述（faithfulness < 0.5 的比例）
-        result.hallucination_rate = round(
-            sum(1 for s in f_scores if s < 0.5) / len(f_scores), 4
-        )
+        result.hallucination_rate = round(sum(1 for s in f_scores if s < 0.5) / len(f_scores), 4)
 
     return result
 
@@ -388,11 +380,13 @@ def compute_generation_metrics(
 # 3. 端到端指标
 # ═══════════════════════════════════════════════════════════════
 
+
 def _ngram_overlap(text1: str, text2: str, n: int) -> tuple[int, int, int]:
     """计算 n-gram 重叠。返回 (overlap, total_pred, total_ref)。"""
+
     def ngrams(text, n):
         words = text.lower().split()
-        return set(tuple(words[i:i+n]) for i in range(len(words) - n + 1))
+        return set(tuple(words[i : i + n]) for i in range(len(words) - n + 1))
 
     ng1 = ngrams(text1, n)
     ng2 = ngrams(text2, n)
@@ -403,6 +397,7 @@ def _ngram_overlap(text1: str, text2: str, n: int) -> tuple[int, int, int]:
 def _rouge_l(pred: str, ref: str) -> tuple[float, float, float]:
     """计算 ROUGE-L（最长公共子序列）。"""
     import difflib
+
     s = difflib.SequenceMatcher(None, pred.lower().split(), ref.lower().split())
     lcs = sum(block.size for block in s.get_matching_blocks())
     precision = lcs / max(len(pred.split()), 1)
@@ -434,7 +429,7 @@ def _semantic_similarity(embeddings, pred: str, ref: str) -> float:
     try:
         pred_emb = embeddings.embed_query(pred)
         ref_emb = embeddings.embed_query(ref)
-        dot = sum(a * b for a, b in zip(pred_emb, ref_emb))
+        dot = sum(a * b for a, b in zip(pred_emb, ref_emb, strict=False))
         norm_p = math.sqrt(sum(a * a for a in pred_emb))
         norm_r = math.sqrt(sum(b * b for b in ref_emb))
         if norm_p == 0 or norm_r == 0:
@@ -466,7 +461,7 @@ def compute_e2e_metrics(
     sem_list = []
     lengths = []
 
-    for item, answer in zip(queries, answers):
+    for item, answer in zip(queries, answers, strict=False):
         ref = item.reference_answer
         if not answer or not ref:
             continue
@@ -492,12 +487,14 @@ def compute_e2e_metrics(
 
         lengths.append(len(answer))
 
-        result.per_query.append({
-            "id": item.id,
-            "rouge_l_f1": round(f, 4),
-            "bleu_1": round(bleu_scores[1], 4),
-            "keyword_coverage": round(em_list[-1], 4) if em_list else 0,
-        })
+        result.per_query.append(
+            {
+                "id": item.id,
+                "rouge_l_f1": round(f, 4),
+                "bleu_1": round(bleu_scores[1], 4),
+                "keyword_coverage": round(em_list[-1], 4) if em_list else 0,
+            }
+        )
 
     if rl_f:
         result.rouge_l_precision = round(statistics.mean(rl_p), 4)
@@ -519,6 +516,7 @@ def compute_e2e_metrics(
 # ═══════════════════════════════════════════════════════════════
 # 4. 切片分析
 # ═══════════════════════════════════════════════════════════════
+
 
 def compute_slice_metrics(
     retrieve_fn,

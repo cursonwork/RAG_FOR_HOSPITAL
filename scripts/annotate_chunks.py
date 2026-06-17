@@ -44,10 +44,10 @@ def generate_colors(n: int) -> list[tuple[float, float, float]]:
     return colors
 
 
-def _hsl_to_rgb(h: float, s: float, l: float) -> tuple[float, float, float]:
+def _hsl_to_rgb(h: float, s: float, lightness: float) -> tuple[float, float, float]:
     """HSL → RGB，返回值范围 [0, 1]。"""
     if s == 0:
-        return (l, l, l)
+        return (lightness, lightness, lightness)
 
     def hue_to_rgb(p, q, t):
         if t < 0:
@@ -62,8 +62,8 @@ def _hsl_to_rgb(h: float, s: float, l: float) -> tuple[float, float, float]:
             return p + (q - p) * (2 / 3 - t) * 6
         return p
 
-    q = l * (1 + s) if l < 0.5 else l + s - l * s
-    p = 2 * l - q
+    q = lightness * (1 + s) if lightness < 0.5 else lightness + s - lightness * s
+    p = 2 * lightness - q
     return (hue_to_rgb(p, q, h + 1 / 3), hue_to_rgb(p, q, h), hue_to_rgb(p, q, h - 1 / 3))
 
 
@@ -133,7 +133,6 @@ def match_elements_to_chunks(
 
     # 回退：文本模糊匹配
     chunk_texts = [(i, normalize_text(c.page_content)) for i, c in enumerate(chunks)]
-    chunk_len = {i: len(t) for i, t in chunk_texts}
 
     for el in elements:
         content = (el.get("content") or "").strip()
@@ -270,12 +269,6 @@ def _draw_page_header(doc, page_idx: int, page_num: int, items, colors, chunks):
     if not page_chunks:
         return
 
-    # 在页面顶部画一条色带
-    y_bar = 28
-    bar_height = 14
-    x_start = 36
-    total_width = min(page.rect.width - 72, 500)
-
     # 不画色带，改用文字标注在右侧
     label = f"Chunks: {', '.join(str(c) for c in page_chunks)}"
     rect = fitz.Rect(page.rect.width - 250, 8, page.rect.width - 36, 22)
@@ -331,7 +324,7 @@ def _add_legend_page(
     headers = ["#", "Section", "Chunk 内容预览"]
     legend_page.draw_line(fitz.Point(margin, y + 4), fitz.Point(page_w - margin, y + 4), color=(0.7, 0.7, 0.7))
     y += 8
-    for col, header in zip(col_x, headers):
+    for col, header in zip(col_x, headers, strict=False):
         legend_page.insert_text(fitz.Point(col, y), header, fontsize=8, color=(0.4, 0.4, 0.4), fontname="helv")
     y += 10
     legend_page.draw_line(fitz.Point(margin, y), fitz.Point(page_w - margin, y), color=(0.7, 0.7, 0.7))
@@ -402,9 +395,7 @@ def _add_legend_page(
 
 def main():
     parser = argparse.ArgumentParser(description="生成 RAG 分块标注 PDF")
-    parser.add_argument(
-        "--input", default="data/documents/paper1_survival_prediction.pdf", help="输入 PDF 路径"
-    )
+    parser.add_argument("--input", default="data/documents/paper1_survival_prediction.pdf", help="输入 PDF 路径")
     parser.add_argument("--output", default=None, help="输出 PDF 路径（默认自动命名）")
     parser.add_argument("--no-legend", action="store_true", help="不生成图例页")
     parser.add_argument("--format", choices=["pdf", "png"], default="pdf", help="输出格式")
@@ -416,10 +407,7 @@ def main():
         sys.exit(1)
 
     stem = input_path.stem
-    if args.output:
-        output_path = args.output
-    else:
-        output_path = f"data/{stem}_chunk_annotation.pdf"
+    output_path = args.output or f"data/{stem}_chunk_annotation.pdf"
 
     print(f"📄 处理: {input_path}")
 
@@ -469,13 +457,13 @@ def main():
         element_to_chunk, chunk_elements = match_elements_to_chunks(text_elements, chunks)
         matched = len(element_to_chunk)
         total = len(text_elements)
-        print(f"   匹配率: {matched}/{total} ({100*matched//total if total else 0}%)")
+        print(f"   匹配率: {matched}/{total} ({100 * matched // total if total else 0}%)")
 
         # 未匹配元素 debug
         unmatched = [el for el in text_elements if el["id"] not in element_to_chunk]
         if unmatched and len(unmatched) <= 10:
             for el in unmatched:
-                print(f"      ⚠ 未匹配: p{el.get('page number')} [{el.get('type')}] \"{el['content'][:80]}\"")
+                print(f'      ⚠ 未匹配: p{el.get("page number")} [{el.get("type")}] "{el["content"][:80]}"')
 
         # ---- Step 4: 生成颜色 ----
         colors = generate_colors(len(chunks))

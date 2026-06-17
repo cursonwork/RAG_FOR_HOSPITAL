@@ -1,38 +1,27 @@
-"""检索管线评估框架。
+"""检索管线评估框架（兼容层）。
 
-提供：
-- EvalCase: 评估用例（query + 相关性判定函数）
-- run_eval: 单管线评估
-- compare_pipelines: 多管线 A/B 对比
-
-用法:
-    from src.retrieval_eval import run_eval, compare_pipelines, load_paper1_queries
-    queries = load_paper1_queries()
-    baseline_fn = lambda q: vector_store.similarity_search(q, k=5)
-    hybrid_fn = lambda q: vector_store.hybrid_search(q, k=5)
-    result = run_eval(baseline_fn, queries)
-    comparison = compare_pipelines(baseline_fn, hybrid_fn, queries)
+核心指标逻辑统一在 src.evaluation.metrics，本模块提供向后兼容的 EvalCase 接口。
 """
 
-import math
-from collections import defaultdict
 from dataclasses import dataclass, field
+
+from src.evaluation.metrics import _dcg, _is_relevant, _ndcg
 
 
 @dataclass
 class EvalCase:
     """单个评估用例。"""
+
     query: str
-    label: str = ""  # 简短描述
-    # 相关性判定：chunk 网页内容包含任意这些关键短语 → 相关
+    label: str = ""
     relevant_phrases: list[str] = field(default_factory=list)
-    # 或指定 section 标题匹配
     relevant_sections: list[str] = field(default_factory=list)
 
 
 @dataclass
 class EvalResult:
     """单次评估结果。"""
+
     name: str = ""
     recall_at_k: dict[int, float] = field(default_factory=dict)
     precision_at_k: dict[int, float] = field(default_factory=dict)
@@ -42,33 +31,14 @@ class EvalResult:
     macro_avg: dict = field(default_factory=dict)
 
 
-def _is_relevant(doc, case: EvalCase) -> bool:
-    """判定一个文档是否与查询相关。"""
-    content = doc.page_content.lower()
-    for phrase in case.relevant_phrases:
-        if phrase.lower() in content:
-            return True
-    section = (doc.metadata.get("section") or "").lower()
-    for sec in case.relevant_sections:
-        if sec.lower() in section:
-            return True
-    return False
+def _doc_is_relevant(doc, case: EvalCase) -> bool:
+    """向后兼容适配器：接受 EvalCase 而非独立参数。"""
+    return _is_relevant(doc, case.relevant_phrases, case.relevant_sections)
 
 
-def _compute_dcg(relevances: list[int], k: int) -> float:
-    """Discounted Cumulative Gain。"""
-    dcg = 0.0
-    for i, rel in enumerate(relevances[:k]):
-        dcg += rel / math.log2(i + 2)
-    return dcg
-
-
-def _compute_ndcg(relevances: list[int], k: int) -> float:
-    """Normalized DCG。"""
-    dcg = _compute_dcg(relevances, k)
-    ideal = sorted(relevances, reverse=True)
-    idcg = _compute_dcg(ideal, k)
-    return dcg / idcg if idcg > 0 else 0.0
+# 向后兼容别名
+_compute_dcg = _dcg
+_compute_ndcg = _ndcg
 
 
 def _compute_mrr(relevances_per_query: list[list[int]]) -> float:
@@ -110,7 +80,7 @@ def run_eval(
             docs = []
 
         # 对每个位置做相关/不相关标注
-        rels = [1 if _is_relevant(d, case) else 0 for d in docs[:k_max]]
+        rels = [1 if _doc_is_relevant(d, case) else 0 for d in docs[:k_max]]
         per_query_relevances.append(rels)
 
     # ── 逐 k 值计算 ──
@@ -119,7 +89,7 @@ def run_eval(
         precisions = []
         ndcgs = []
 
-        for i, case in enumerate(queries):
+        for i, _case in enumerate(queries):
             rels = per_query_relevances[i][:k]
             retrieved_relevant = sum(rels)
             # 分母至少为检索到的相关文档数（保守估计，recall ≤ 1.0）
@@ -181,7 +151,7 @@ def compare_pipelines(
                 "baseline": round(b, 4),
                 "candidate": round(c, 4),
                 "delta": round(delta, 4),
-                "pct": f"{delta/b*100:+.1f}%" if b > 0 else "N/A",
+                "pct": f"{delta / b * 100:+.1f}%" if b > 0 else "N/A",
             }
 
     deltas["mrr"] = {
@@ -200,6 +170,7 @@ def compare_pipelines(
 # ═══════════════════════════════════════════════════════════════
 # Paper1 评估用例（20 条）
 # ═══════════════════════════════════════════════════════════════
+
 
 def load_paper1_queries() -> list[EvalCase]:
     """返回 paper1（结直肠癌深度学习预后预测）的 20 条评估用例。
@@ -233,7 +204,6 @@ def load_paper1_queries() -> list[EvalCase]:
             label="精确: CAF signature",
             relevant_phrases=["CAF", "cancer-associated fibroblast", "Isella"],
         ),
-
         # ── 语义理解（5 条）──
         EvalCase(
             query="How does the microenvironment affect colorectal cancer patient outcome?",
@@ -265,7 +235,6 @@ def load_paper1_queries() -> list[EvalCase]:
             relevant_phrases=["validation cohort", "DACHS", "independent cohort", "generalizes"],
             relevant_sections=["Deep stroma score generalizes"],
         ),
-
         # ── 多步推理（5 条）──
         EvalCase(
             query="Compare the deep stroma score to the CAF gene expression signature as prognostic markers",
@@ -297,7 +266,6 @@ def load_paper1_queries() -> list[EvalCase]:
             relevant_phrases=["limitation", "proof of concept", "retrospective", "validated prospectively"],
             relevant_sections=["Discussion"],
         ),
-
         # ── 方法学/技术（5 条）──
         EvalCase(
             query="What patient cohorts were used and what were their characteristics?",

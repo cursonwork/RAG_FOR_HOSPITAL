@@ -6,6 +6,7 @@
 
 import base64
 import io
+import json
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -19,21 +20,19 @@ from src.logger import get_logger
 
 logger = get_logger(__name__)
 
-IMAGE_DESCRIPTION_PROMPT = """请用中文详细描述这张医学图片的内容。
-包括以下方面：
-1. 图片类型（图表/影像/病理切片/流程图/表格等）
-2. 关键数据和发现
-3. 医学意义（如有）
-4. 与图片标题的关联
+IMAGE_DESCRIPTION_PROMPT = """Describe this medical image concisely.
 
-图片标题：{caption}
+Reply in the same language as the image caption. If no caption, reply in Chinese.
 
-请直接描述，不要加"这张图片显示了..."之类的前缀。"""
+Include:
+1. Image type (chart / radiology / pathology slide / diagram / photo / table)
+2. Key visual elements and any data shown
+3. Medical/clinical significance if apparent
 
-# 并发参数
-MAX_CONCURRENT = 8
-# 小于此字节数的图片视为噪声（icon、logo 等），直接跳过
-MIN_IMAGE_BYTES = 5 * 1024  # 5KB
+Image caption: {caption}
+
+Output only the description, no prefixes like "This image shows..." or "这张图片显示了..."."""
+
 
 
 @dataclass
@@ -110,9 +109,7 @@ def describe_image(image_bytes: bytes, caption: str = "", client: OpenAI | None 
         return ""
 
 
-def _find_caption_for_image(
-    page: fitz.Page, img_bbox: tuple, caption_candidates: list[dict]
-) -> str:
+def _find_caption_for_image(page: fitz.Page, img_bbox: tuple, caption_candidates: list[dict]) -> str:
     """在同页 JSON 元素中找离图片最近的 caption/paragraph。"""
     if not img_bbox:
         return ""
@@ -170,7 +167,7 @@ def extract_images_from_pdf(file_path: str, json_data: dict | None = None) -> li
                 continue
 
             # 过滤小图（icon / logo 等噪声）
-            if len(image_bytes) < MIN_IMAGE_BYTES:
+            if len(image_bytes) < settings.image_min_bytes:
                 continue
 
             fmt = base_image.get("ext", "png")
@@ -193,13 +190,15 @@ def extract_images_from_pdf(file_path: str, json_data: dict | None = None) -> li
                 if titles:
                     caption = titles[-1]
 
-            images.append({
-                "image_bytes": image_bytes,
-                "format": fmt,
-                "page": page_num,
-                "caption": caption,
-                "bbox": bbox,
-            })
+            images.append(
+                {
+                    "image_bytes": image_bytes,
+                    "format": fmt,
+                    "page": page_num,
+                    "caption": caption,
+                    "bbox": bbox,
+                }
+            )
 
     doc.close()
     return images
@@ -207,19 +206,18 @@ def extract_images_from_pdf(file_path: str, json_data: dict | None = None) -> li
 
 # ── 第一阶段：提取图片并写入占位记录 ──
 
+
 def save_image_placeholders(file_path: str, source_name: str) -> list[ImageRecord]:
     """提取图片 → 写 PG + 写 Milvus 占位（描述留空）。返回 ImageRecord 列表供第二阶段。"""
-    import json
+    from contextlib import suppress
 
     json_data = None
     if settings.pdf_parser == "opendataloader":
         stem = Path(file_path).stem
         json_path = Path(file_path).parent / f"{stem}.json"
         if json_path.exists():
-            try:
+            with suppress(Exception):
                 json_data = json.loads(json_path.read_text(encoding="utf-8"))
-            except Exception:
-                pass
 
     images = extract_images_from_pdf(file_path, json_data)
     if not images:
@@ -245,6 +243,7 @@ def save_image_placeholders(file_path: str, source_name: str) -> list[ImageRecor
 
     # 写 Milvus（用 caption 做向量，描述为空）
     from src.vector_store import get_vector_store
+
     store = get_vector_store()
     store.add_image_placeholders(records)
 
@@ -253,6 +252,7 @@ def save_image_placeholders(file_path: str, source_name: str) -> list[ImageRecor
 
 
 # ── 第二阶段：并发生成描述并 UPDATE ──
+
 
 def _describe_one(record: ImageRecord, client: OpenAI) -> ImageRecord:
     """并发任务：描述单张图片。"""
@@ -268,12 +268,12 @@ def fill_image_descriptions(records: list[ImageRecord]) -> list[ImageRecord]:
 
     client = _get_qwen_client()
     total = len(records)
-    logger.info("开始并发生成 %d 张图片描述 (max_workers=%d)...", total, MAX_CONCURRENT)
+    logger.info("开始并发生成 %d 张图片描述 (max_workers=%d)...", total, settings.image_max_concurrent)
 
     completed: list[ImageRecord] = []
     failed = 0
 
-    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT) as executor:
+    with ThreadPoolExecutor(max_workers=settings.image_max_concurrent) as executor:
         futures = {executor.submit(_describe_one, r, client): i for i, r in enumerate(records)}
         for future in as_completed(futures):
             idx = futures[future]
@@ -294,10 +294,12 @@ def fill_image_descriptions(records: list[ImageRecord]) -> list[ImageRecord]:
     # 批量 UPDATE PG + 重建 Milvus
     if completed:
         from src.database import update_image_description
+
         for r in completed:
             update_image_description(r.id, r.description)
         # 重建向量（用新描述）
         from src.vector_store import get_vector_store
+
         get_vector_store().update_image_vectors(completed)
         logger.info("图片向量已更新: %d 张", len(completed))
 

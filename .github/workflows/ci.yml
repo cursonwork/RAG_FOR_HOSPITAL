@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - run: uv sync --group dev
+      - run: uv run ruff check src/ app.py main.py scripts/
+      - run: uv run ruff format --check src/ app.py main.py scripts/
+      - run: uv run mypy src/
+
+  test:
+    needs: lint
+    runs-on: ubuntu-latest
+    services:
+      milvus:
+        image: milvusdb/milvus:v2.5.10
+        ports:
+          - 19530:19530
+        env:
+          ETCD_ENDPOINTS: etcd:2379
+          MINIO_ADDRESS: minio:9000
+        options: >-
+          --health-cmd "curl -f http://localhost:9091/healthz"
+          --health-interval 30s
+          --health-timeout 20s
+          --health-retries 3
+      postgres:
+        image: postgres:15-alpine
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: hospital_rag
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - run: uv sync --group dev
+      - run: uv run pytest tests/ -v --cov=src --cov-fail-under=30
+        env:
+          MILVUS_HOST: localhost
+          MILVUS_PORT: 19530
+          PG_HOST: localhost
+          PG_PORT: 5432
+          PG_DATABASE: hospital_rag
+          PG_USER: postgres
+          PG_PASSWORD: postgres
+          DEEPSEEK_API_KEY: ci-test-key
+          DASHSCOPE_API_KEY: ci-test-key
+          OLLAMA_BASE_URL: http://localhost:11434/v1
+
+  docker:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t rag-hospital .

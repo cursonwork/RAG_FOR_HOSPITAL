@@ -1,5 +1,5 @@
-from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
+from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 
 from src.config import settings
 from src.logger import get_logger
@@ -54,9 +54,7 @@ def _get_element_text(el: dict) -> str:
         items = el.get("list items", [])
         if items:
             return "\n".join(
-                (item.get("content") or "").strip()
-                for item in items
-                if (item.get("content") or "").strip()
+                (item.get("content") or "").strip() for item in items if (item.get("content") or "").strip()
             )
 
     return ""
@@ -181,16 +179,18 @@ def _build_section_chunks(
             page = el.get("page number", 0)
             subs = size_splitter.split_text(text)
             for sub_text in subs:
-                chunks.append(Document(
-                    page_content=sub_text,
-                    metadata={
-                        "source": source,
-                        "section_title": section_title,
-                        "page": page,
-                        "chunk_index": start_index + len(chunks),
-                        "parser": "opendataloader-json",
-                    },
-                ))
+                chunks.append(
+                    Document(
+                        page_content=sub_text,
+                        metadata={
+                            "source": source,
+                            "section_title": section_title,
+                            "page": page,
+                            "chunk_index": start_index + len(chunks),
+                            "parser": "opendataloader-json",
+                        },
+                    )
+                )
         else:
             current_elems.append(el)
             current_len += len(text)
@@ -213,17 +213,19 @@ def _emit_chunk(
     text = "\n\n".join(_get_element_text(el) for el in elems)
     page = elems[0].get("page number", 0)
     element_ids = [el["id"] for el in elems if "id" in el]
-    chunks.append(Document(
-        page_content=text,
-        metadata={
-            "source": source,
-            "section_title": section_title,
-            "page": page,
-            "chunk_index": chunk_index,
-            "parser": "opendataloader-json",
-            "element_ids": element_ids,
-        },
-    ))
+    chunks.append(
+        Document(
+            page_content=text,
+            metadata={
+                "source": source,
+                "section_title": section_title,
+                "page": page,
+                "chunk_index": chunk_index,
+                "parser": "opendataloader-json",
+                "element_ids": element_ids,
+            },
+        )
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -282,26 +284,30 @@ def _split_by_markdown(doc: Document) -> list[Document]:
 
         if len(text) <= settings.chunk_size + 100:
             chunk_index += 1
-            all_chunks.append(Document(
-                page_content=text,
-                metadata={
-                    **doc.metadata,
-                    "section_title": section,
-                    "chunk_index": chunk_index,
-                },
-            ))
-        else:
-            subs = size_splitter.split_text(text)
-            for sub_text in subs:
-                chunk_index += 1
-                all_chunks.append(Document(
-                    page_content=sub_text,
+            all_chunks.append(
+                Document(
+                    page_content=text,
                     metadata={
                         **doc.metadata,
                         "section_title": section,
                         "chunk_index": chunk_index,
                     },
-                ))
+                )
+            )
+        else:
+            subs = size_splitter.split_text(text)
+            for sub_text in subs:
+                chunk_index += 1
+                all_chunks.append(
+                    Document(
+                        page_content=sub_text,
+                        metadata={
+                            **doc.metadata,
+                            "section_title": section,
+                            "chunk_index": chunk_index,
+                        },
+                    )
+                )
 
     return all_chunks
 
@@ -317,8 +323,7 @@ def create_semantic_splitter():
     优先使用 opendataloader JSON 元素进行 section-aware 分块（精确标题、段落边界、页码），
     JSON 不可用时回退到 Markdown 标题分块。
     """
-    logger.debug("创建语义分块器 chunk_size=%d overlap=%d (ODL JSON 优先)",
-                 settings.chunk_size, settings.chunk_overlap)
+    logger.debug("创建语义分块器 chunk_size=%d overlap=%d (ODL JSON 优先)", settings.chunk_size, settings.chunk_overlap)
 
     def split_documents(documents: list[Document]) -> list[Document]:
         all_chunks: list[Document] = []

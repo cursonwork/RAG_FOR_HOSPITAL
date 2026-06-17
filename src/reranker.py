@@ -12,8 +12,10 @@ FlashRank 使用 ONNX Runtime 运行 sub-14MB 的 miniLM 模型，
     reranked = reranker.compress_documents(docs, query)  # → top-5
 """
 
+import threading
+
 from langchain_core.callbacks import Callbacks
-from langchain_core.documents import Document, BaseDocumentCompressor
+from langchain_core.documents import BaseDocumentCompressor, Document
 
 from src.config import settings
 from src.logger import get_logger
@@ -40,6 +42,7 @@ class FlashRankReranker(BaseDocumentCompressor):
             logger.info("加载 FlashRank 模型: %s", self._model_name)
             try:
                 from flashrank import Ranker
+
                 self._ranker = Ranker(model_name=self._model_name)
             except Exception:
                 logger.warning(
@@ -59,7 +62,7 @@ class FlashRankReranker(BaseDocumentCompressor):
             if key not in seen:
                 seen.add(key)
                 unique.append(doc)
-        return unique[:self._top_n]
+        return unique[: self._top_n]
 
     def compress_documents(
         self,
@@ -81,23 +84,20 @@ class FlashRankReranker(BaseDocumentCompressor):
 
         ranker = self._lazy_ranker
         if ranker is None:
-            return deduped[:self._top_n]
+            return deduped[: self._top_n]
 
         # 构建 FlashRank 输入
-        passages = [
-            {"id": i, "text": doc.page_content, "meta": {}}
-            for i, doc in enumerate(deduped)
-        ]
+        passages = [{"id": i, "text": doc.page_content, "meta": {}} for i, doc in enumerate(deduped)]
 
         try:
             results = ranker.rerank(query, passages)
         except Exception:
             logger.exception("FlashRank 重排序失败，降级返回")
-            return deduped[:self._top_n]
+            return deduped[: self._top_n]
 
         # 构建结果
         reranked: list[Document] = []
-        for result in results[:self._top_n]:
+        for result in results[: self._top_n]:
             doc = deduped[result["id"]]
             doc.metadata["rerank_score"] = round(float(result["score"]), 4)
             doc.metadata["rerank_rank"] = len(reranked) + 1
@@ -105,19 +105,23 @@ class FlashRankReranker(BaseDocumentCompressor):
 
         logger.debug(
             "重排序: %d → %d 文档 (top score=%.4f)",
-            len(deduped), len(reranked),
+            len(deduped),
+            len(reranked),
             reranked[0].metadata["rerank_score"] if reranked else 0,
         )
         return reranked
 
 
 _reranker: FlashRankReranker | None = None
+_reranker_lock = threading.Lock()
 
 
 def get_reranker() -> FlashRankReranker:
     global _reranker
     if _reranker is None:
-        _reranker = FlashRankReranker()
+        with _reranker_lock:
+            if _reranker is None:
+                _reranker = FlashRankReranker()
     return _reranker
 
 

@@ -26,8 +26,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.config import settings
 from src.logger import get_logger
-from src.vector_store import get_vector_store
 from src.reranker import get_reranker
+from src.vector_store import get_vector_store
 
 logger = get_logger(__name__)
 
@@ -35,6 +35,7 @@ logger = get_logger(__name__)
 # ═══════════════════════════════════════════════════════════════
 # 检索管线工厂函数
 # ═══════════════════════════════════════════════════════════════
+
 
 def baseline_retrieve(query: str, k: int = 20):
     """纯稠密向量检索。"""
@@ -68,22 +69,21 @@ def hybrid_rerank_retrieve(query: str, k: int = 5):
 # 主入口
 # ═══════════════════════════════════════════════════════════════
 
+
 def main():
     parser = argparse.ArgumentParser(description="RAG 系统全面评估")
-    parser.add_argument("--retrieval-only", action="store_true",
-                        help="仅运行检索评估（不需要 LLM）")
-    parser.add_argument("--compare", action="store_true",
-                        help="对比多条检索管线")
-    parser.add_argument("--slices", action="store_true",
-                        help="按维度切片分析")
-    parser.add_argument("--output-dir", default="data/eval_results",
-                        help="评估结果输出目录")
+    parser.add_argument("--retrieval-only", action="store_true", help="仅运行检索评估（不需要 LLM）")
+    parser.add_argument("--compare", action="store_true", help="对比多条检索管线")
+    parser.add_argument("--slices", action="store_true", help="按维度切片分析")
+    parser.add_argument("--output-dir", default="data/eval_results", help="评估结果输出目录")
     args = parser.parse_args()
 
-    from src.evaluation.dataset import get_dataset, dataset_stats
+    from src.evaluation.dataset import dataset_stats, get_dataset
     from src.evaluation.metrics import compute_retrieval_metrics, compute_slice_metrics
     from src.evaluation.runner import (
-        run_full_evaluation, generate_report, compare_pipelines, EvalConfig,
+        EvalConfig,
+        generate_report,
+        run_full_evaluation,
     )
 
     print("=" * 72)
@@ -93,7 +93,7 @@ def main():
     print(f"\n数据集: {stats['total']} 条 QA 对 (7 篇论文)")
     print(f"  类型: {stats['by_type']}")
     print(f"  难度: {stats['by_difficulty']}")
-    print(f"\n系统配置:")
+    print("\n系统配置:")
     print(f"  HYBRID_ENABLED: {settings.hybrid_enabled}")
     print(f"  RERANKER_ENABLED: {settings.reranker_enabled}")
     print(f"  RERANKER_MODEL: {settings.reranker_model}")
@@ -143,13 +143,13 @@ def main():
         ]:
             row = f"│ {metric_label:<20}"
             best_val = -1
-            best_name = ""
+            _best_name = ""
             for name in pipelines:
                 val = getattr(results[name], metric_key).get(5, 0)
                 row += f" {val:<32.4f}"
                 if val > best_val:
                     best_val = val
-                    best_name = name
+                    _best_name = name
             print(row)
 
         # MRR and MAP
@@ -168,15 +168,15 @@ def main():
         best_pipeline = "hybrid + rerank"
         print(f"┌─ {best_pipeline} 逐论文分析 (@5)")
         print("│")
-        slice_result = compute_slice_metrics(
-            hybrid_rerank_retrieve, queries, k_value=5
-        )
+        slice_result = compute_slice_metrics(hybrid_rerank_retrieve, queries, k_value=5)
         for slice_name in sorted(slice_result.keys()):
             if slice_name.startswith("paper:"):
                 s = slice_result[slice_name]
-                print(f"│  {slice_name:<30}  n={s['count']:>3}  "
-                      f"R@5={s['recall@5']:.4f}  P@5={s['precision@5']:.4f}  "
-                      f"NDCG@5={s['ndcg@5']:.4f}  MRR={s['mrr']:.4f}")
+                print(
+                    f"│  {slice_name:<30}  n={s['count']:>3}  "
+                    f"R@5={s['recall@5']:.4f}  P@5={s['precision@5']:.4f}  "
+                    f"NDCG@5={s['ndcg@5']:.4f}  MRR={s['mrr']:.4f}"
+                )
         print("│")
         print("└─")
 
@@ -187,9 +187,11 @@ def main():
         for slice_name in sorted(slice_result.keys()):
             if slice_name.startswith("type:"):
                 s = slice_result[slice_name]
-                print(f"│  {slice_name:<30}  n={s['count']:>3}  "
-                      f"R@5={s['recall@5']:.4f}  P@5={s['precision@5']:.4f}  "
-                      f"MRR={s['mrr']:.4f}")
+                print(
+                    f"│  {slice_name:<30}  n={s['count']:>3}  "
+                    f"R@5={s['recall@5']:.4f}  P@5={s['precision@5']:.4f}  "
+                    f"MRR={s['mrr']:.4f}"
+                )
         print("│")
         print("└─")
 
@@ -200,9 +202,11 @@ def main():
         for slice_name in sorted(slice_result.keys()):
             if slice_name.startswith("difficulty:"):
                 s = slice_result[slice_name]
-                print(f"│  {slice_name:<30}  n={s['count']:>3}  "
-                      f"R@5={s['recall@5']:.4f}  P@5={s['precision@5']:.4f}  "
-                      f"MRR={s['mrr']:.4f}")
+                print(
+                    f"│  {slice_name:<30}  n={s['count']:>3}  "
+                    f"R@5={s['recall@5']:.4f}  P@5={s['precision@5']:.4f}  "
+                    f"MRR={s['mrr']:.4f}"
+                )
         print("│")
         print("└─")
 
@@ -232,14 +236,14 @@ def main():
             bv = getattr(b, metric_key).get(5, 0)
             cv = getattr(c, metric_key).get(5, 0)
             delta = cv - bv
-            pct = f"{delta/bv*100:+.1f}%" if bv > 0 else "N/A"
+            pct = f"{delta / bv * 100:+.1f}%" if bv > 0 else "N/A"
             flag = "✅" if delta > 0 else ("➖" if delta == 0 else "❌")
             print(f"  {metric_label:<20}  {bv:.4f} → {cv:.4f}  Δ={delta:+.4f}  {pct}  {flag}")
 
         b_mrr = b.mrr
         c_mrr = c.mrr
         delta_mrr = c_mrr - b_mrr
-        pct_mrr = f"{delta_mrr/b_mrr*100:+.1f}%" if b_mrr > 0 else "N/A"
+        pct_mrr = f"{delta_mrr / b_mrr * 100:+.1f}%" if b_mrr > 0 else "N/A"
         print(f"  {'MRR':<20}  {b_mrr:.4f} → {c_mrr:.4f}  Δ={delta_mrr:+.4f}  {pct_mrr}")
         print("─" * 72)
 
@@ -255,9 +259,11 @@ def main():
             for slice_name in sorted(slice_result.keys()):
                 if slice_name.startswith(f"{group_name}:"):
                     s = slice_result[slice_name]
-                    print(f"│  {slice_name:<35}  n={s['count']:>3}  "
-                          f"R@5={s['recall@5']:.4f}  P@5={s['precision@5']:.4f}  "
-                          f"NDCG@5={s['ndcg@5']:.4f}  MRR={s['mrr']:.4f}")
+                    print(
+                        f"│  {slice_name:<35}  n={s['count']:>3}  "
+                        f"R@5={s['recall@5']:.4f}  P@5={s['precision@5']:.4f}  "
+                        f"NDCG@5={s['ndcg@5']:.4f}  MRR={s['mrr']:.4f}"
+                    )
             print("└─")
         return
 
@@ -279,22 +285,30 @@ def main():
             metrics = compute_retrieval_metrics(fn, queries, k_values=k_values)
             t1 = time.perf_counter()
 
-            print(f"  Recall@1/3/5/10/20:  "
-                  f"{metrics.recall_at_k.get(1,0):.4f} / {metrics.recall_at_k.get(3,0):.4f} / "
-                  f"{metrics.recall_at_k.get(5,0):.4f} / {metrics.recall_at_k.get(10,0):.4f} / "
-                  f"{metrics.recall_at_k.get(20,0):.4f}")
-            print(f"  Precision@1/3/5/10/20: "
-                  f"{metrics.precision_at_k.get(1,0):.4f} / {metrics.precision_at_k.get(3,0):.4f} / "
-                  f"{metrics.precision_at_k.get(5,0):.4f} / {metrics.precision_at_k.get(10,0):.4f} / "
-                  f"{metrics.precision_at_k.get(20,0):.4f}")
-            print(f"  NDCG@1/3/5/10/20:     "
-                  f"{metrics.ndcg_at_k.get(1,0):.4f} / {metrics.ndcg_at_k.get(3,0):.4f} / "
-                  f"{metrics.ndcg_at_k.get(5,0):.4f} / {metrics.ndcg_at_k.get(10,0):.4f} / "
-                  f"{metrics.ndcg_at_k.get(20,0):.4f}")
-            print(f"  Hit Rate@1/3/5/10/20: "
-                  f"{metrics.hit_at_k.get(1,0):.4f} / {metrics.hit_at_k.get(3,0):.4f} / "
-                  f"{metrics.hit_at_k.get(5,0):.4f} / {metrics.hit_at_k.get(10,0):.4f} / "
-                  f"{metrics.hit_at_k.get(20,0):.4f}")
+            print(
+                f"  Recall@1/3/5/10/20:  "
+                f"{metrics.recall_at_k.get(1, 0):.4f} / {metrics.recall_at_k.get(3, 0):.4f} / "
+                f"{metrics.recall_at_k.get(5, 0):.4f} / {metrics.recall_at_k.get(10, 0):.4f} / "
+                f"{metrics.recall_at_k.get(20, 0):.4f}"
+            )
+            print(
+                f"  Precision@1/3/5/10/20: "
+                f"{metrics.precision_at_k.get(1, 0):.4f} / {metrics.precision_at_k.get(3, 0):.4f} / "
+                f"{metrics.precision_at_k.get(5, 0):.4f} / {metrics.precision_at_k.get(10, 0):.4f} / "
+                f"{metrics.precision_at_k.get(20, 0):.4f}"
+            )
+            print(
+                f"  NDCG@1/3/5/10/20:     "
+                f"{metrics.ndcg_at_k.get(1, 0):.4f} / {metrics.ndcg_at_k.get(3, 0):.4f} / "
+                f"{metrics.ndcg_at_k.get(5, 0):.4f} / {metrics.ndcg_at_k.get(10, 0):.4f} / "
+                f"{metrics.ndcg_at_k.get(20, 0):.4f}"
+            )
+            print(
+                f"  Hit Rate@1/3/5/10/20: "
+                f"{metrics.hit_at_k.get(1, 0):.4f} / {metrics.hit_at_k.get(3, 0):.4f} / "
+                f"{metrics.hit_at_k.get(5, 0):.4f} / {metrics.hit_at_k.get(10, 0):.4f} / "
+                f"{metrics.hit_at_k.get(20, 0):.4f}"
+            )
             print(f"  MRR: {metrics.mrr:.4f}  (95% CI: {metrics.mrr_ci[0]:.4f}–{metrics.mrr_ci[1]:.4f})")
             print(f"  MAP: {metrics.map_score:.4f}")
 
@@ -303,7 +317,7 @@ def main():
             if failures:
                 print(f"  ⚠ 零召回@5: {len(failures)}/{len(metrics.per_query)}")
             else:
-                print(f"  ✅ 所有查询至少找回 1 个相关文档")
+                print("  ✅ 所有查询至少找回 1 个相关文档")
 
             print(f"  耗时: {t1 - t0:.1f}s")
 
@@ -313,8 +327,8 @@ def main():
     print("运行模式: 完整评估（检索 + LLM-as-judge 生成评估）\n")
 
     # 创建 LLM
-    from src.llm import create_llm
     from src.embeddings import create_embeddings
+    from src.llm import create_llm
 
     try:
         llm = create_llm()
@@ -330,15 +344,18 @@ def main():
 
     if llm:
         # 创建生成函数
-        from src.rag_chain import format_docs
-        from src.prompts import get_system_prompt
-        from langchain_core.prompts import ChatPromptTemplate
         from langchain_core.output_parsers import StrOutputParser
+        from langchain_core.prompts import ChatPromptTemplate
 
-        prompt_tpl = ChatPromptTemplate.from_messages([
-            ("system", get_system_prompt("medical_qa")),
-            ("human", "Context:\n{context}\n\nQuestion: {question}\n\nAnswer:"),
-        ])
+        from src.prompts import get_system_prompt
+        from src.rag_chain import format_docs
+
+        prompt_tpl = ChatPromptTemplate.from_messages(
+            [
+                ("system", get_system_prompt("medical_qa")),
+                ("human", "Context:\n{context}\n\nQuestion: {question}\n\nAnswer:"),
+            ]
+        )
         generate_chain = prompt_tpl | llm | StrOutputParser()
 
         def generate_fn(question: str, docs) -> str:
@@ -387,14 +404,16 @@ def main():
     print()
     print("┌─ 切片分析 (Slice Analysis)")
     for group_name, group_label in [("paper", "论文"), ("type", "问题类型"), ("difficulty", "难度")]:
-        print(f"│")
+        print("│")
         print(f"│  ── 按{group_label} ──")
         for slice_name in sorted(slices.keys()):
             if slice_name.startswith(f"{group_name}:"):
                 s = slices[slice_name]
-                print(f"│  {slice_name:<35}  n={s['count']:>3}  "
-                      f"R@5={s['recall@5']:.4f}  P@5={s['precision@5']:.4f}  "
-                      f"NDCG@5={s['ndcg@5']:.4f}  MRR={s['mrr']:.4f}")
+                print(
+                    f"│  {slice_name:<35}  n={s['count']:>3}  "
+                    f"R@5={s['recall@5']:.4f}  P@5={s['precision@5']:.4f}  "
+                    f"NDCG@5={s['ndcg@5']:.4f}  MRR={s['mrr']:.4f}"
+                )
     print("│")
     print("└─")
 

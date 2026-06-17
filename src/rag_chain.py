@@ -1,6 +1,8 @@
+from contextvars import ContextVar
+
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
-from langchain_core.runnables import RunnableLambda, RunnablePassthrough, RunnableParallel
+from langchain_core.runnables import RunnableLambda, RunnableParallel, RunnablePassthrough
 
 from src.config import settings
 from src.intent import classify_intent
@@ -10,13 +12,14 @@ from src.prompts import get_system_prompt
 
 logger = get_logger(__name__)
 
-# 存储最近一次检索结果，供 app.py 构建 citation_map
-_last_retrieved_docs: list = []
+# Per-request context variable — avoids race conditions under concurrent Streamlit sessions
+_last_retrieved_docs: ContextVar[list | None] = ContextVar("_last_retrieved_docs", default=None)
 
 
 def get_last_retrieved_docs() -> list:
-    """返回最近一次检索到的文档列表（供 UI 层构建引用映射）。"""
-    return _last_retrieved_docs
+    """Return the most recent retrieved documents (for UI citation map)."""
+    docs = _last_retrieved_docs.get()
+    return docs if docs is not None else []
 
 
 def _retrieve_and_rank(
@@ -37,8 +40,8 @@ def _retrieve_and_rank(
         排好序的 Document 列表
     """
     from src.query_rewriter import rewrite_query
-    from src.vector_store import get_vector_store
     from src.reranker import get_reranker
+    from src.vector_store import get_vector_store
 
     top_k = top_k or settings.retrieval_top_k
     store = get_vector_store()
@@ -64,7 +67,8 @@ def _retrieve_and_rank(
 
     logger.debug(
         "多查询检索: %d 个变体 → %d 个候选文档 (去重后)",
-        len(variants), len(all_docs),
+        len(variants),
+        len(all_docs),
     )
 
     # Step 3: 重排序
@@ -73,8 +77,7 @@ def _retrieve_and_rank(
         all_docs = reranker.compress_documents(all_docs, question)
 
     result = all_docs[:top_k]
-    global _last_retrieved_docs
-    _last_retrieved_docs = result
+    _last_retrieved_docs.set(result)
     return result
 
 
@@ -102,7 +105,8 @@ def format_docs(docs: list) -> str:
             desc = image["description"] if image else doc.page_content
             caption = image["caption"] if image else ""
             parts.append(
-                f"[图{image_idx}] 来源: {source}" + (f" 第{page}页" if page else "")
+                f"[图{image_idx}] 来源: {source}"
+                + (f" 第{page}页" if page else "")
                 + f"\n图片描述: {desc}"
                 + (f"\n原始说明: {caption}" if caption else "")
             )
@@ -121,17 +125,19 @@ def format_docs(docs: list) -> str:
             header += f"{relevance}\n原文: {original_text}"
             parts.append(header)
 
-    logger.debug("格式化上下文: %d 个文档块 (文本%d, 图片%d), 总长度 %d 字符",
-                 len(docs), text_idx, image_idx, sum(len(p) for p in parts))
+    logger.debug(
+        "格式化上下文: %d 个文档块 (文本%d, 图片%d), 总长度 %d 字符",
+        len(docs),
+        text_idx,
+        image_idx,
+        sum(len(p) for p in parts),
+    )
     return "\n\n---\n\n".join(parts)
 
 
 def create_rag_chain(mode: str | None = None):
     """创建 RAG 问答链。mode=None 时自动识别意图。"""
-    from src.vector_store import get_retriever
-
     llm = create_llm()
-    retriever = get_retriever()
 
     def _build_prompt(inputs: dict) -> dict:
         question = inputs.get("question", "")

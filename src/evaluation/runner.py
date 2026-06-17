@@ -5,19 +5,15 @@
 
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
-from src.evaluation.dataset import DATASET, get_dataset, dataset_stats
+from src.evaluation.dataset import dataset_stats, get_dataset
 from src.evaluation.metrics import (
-    RetrievalMetrics,
-    GenerationMetrics,
-    EndToEndMetrics,
     FullEvalResult,
-    compute_retrieval_metrics,
-    compute_generation_metrics,
     compute_e2e_metrics,
-    compute_slice_metrics,
+    compute_generation_metrics,
+    compute_retrieval_metrics,
 )
 from src.logger import get_logger
 
@@ -27,6 +23,7 @@ logger = get_logger(__name__)
 @dataclass
 class EvalConfig:
     """评估配置。"""
+
     k_values: tuple[int, ...] = (1, 3, 5, 10, 20)
     enable_generation_eval: bool = True  # 是否运行 LLM-as-judge
     generation_sample_size: int = 20  # LLM 评估的采样数
@@ -69,9 +66,7 @@ def run_full_evaluation(
     # ── Phase 1: 检索评估 ──
     logger.info("\n[Phase 1/3] 检索指标评估...")
     t0 = time.perf_counter()
-    result.retrieval = compute_retrieval_metrics(
-        retrieve_fn, queries, k_values=config.k_values
-    )
+    result.retrieval = compute_retrieval_metrics(retrieve_fn, queries, k_values=config.k_values)
     t1 = time.perf_counter()
     logger.info("检索评估完成 (%.1fs)", t1 - t0)
 
@@ -84,7 +79,7 @@ def run_full_evaluation(
         # 分层采样
         if len(queries) > config.generation_sample_size:
             step = max(1, len(queries) // config.generation_sample_size)
-            gen_indices = list(range(0, len(queries), step))[:config.generation_sample_size]
+            gen_indices = list(range(0, len(queries), step))[: config.generation_sample_size]
         else:
             gen_indices = list(range(len(queries)))
 
@@ -117,12 +112,14 @@ def run_full_evaluation(
         if config.enable_generation_eval and llm:
             logger.info("\n[Phase 3/3] LLM-as-judge 生成质量评估...")
             result.generation = compute_generation_metrics(
-                llm, gen_queries, answers, contexts,
+                llm,
+                gen_queries,
+                answers,
+                contexts,
                 sample_size=config.generation_sample_size,
             )
     else:
         logger.info("\n[Phase 2-3/3] 跳过（未提供 generate_fn 或 llm）")
-
 
     t2 = time.perf_counter()
     logger.info("全系统评估完成 (总耗时 %.1fs)", t2 - t0)
@@ -146,6 +143,7 @@ def generate_report(
     e = result.e2e
 
     lines = []
+
     def _add(line=""):
         lines.append(line)
 
@@ -209,9 +207,13 @@ def generate_report(
     failures_0 = [q for q in r.per_query if q["relevant@5"] == 0]
     failures_1 = [q for q in r.per_query if q["relevant@5"] <= 1]
     _add()
-    _add(f"┌─ 检索诊断")
-    _add(f"│  零召回 (relevant@5=0): {len(failures_0)}/{len(r.per_query)} ({len(failures_0)/max(len(r.per_query),1)*100:.1f}%)")
-    _add(f"│  低召回 (relevant@5≤1): {len(failures_1)}/{len(r.per_query)} ({len(failures_1)/max(len(r.per_query),1)*100:.1f}%)")
+    _add("┌─ 检索诊断")
+    _add(
+        f"│  零召回 (relevant@5=0): {len(failures_0)}/{len(r.per_query)} ({len(failures_0) / max(len(r.per_query), 1) * 100:.1f}%)"
+    )
+    _add(
+        f"│  低召回 (relevant@5≤1): {len(failures_1)}/{len(r.per_query)} ({len(failures_1) / max(len(r.per_query), 1) * 100:.1f}%)"
+    )
     if failures_0:
         _add("│  零召回列表:")
         for f in failures_0[:10]:
@@ -250,7 +252,7 @@ def generate_report(
     _add(f"│  检索得分 (40%):    {composite['retrieval_score']:.4f}")
     _add(f"│  生成得分 (40%):    {composite['generation_score']:.4f}")
     _add(f"│  端到端得分 (20%):  {composite['e2e_score']:.4f}")
-    _add(f"│  ──────────────────────────")
+    _add("│  ──────────────────────────")
     _add(f"│  综合评分:           {composite['overall']:.4f} / 1.0000")
     _add(f"│  等级:               {composite['grade']}")
     _add("└─")
@@ -282,7 +284,9 @@ def generate_report(
                 "context_relevance": g.context_relevance if g else None,
                 "hallucination_rate": g.hallucination_rate if g else None,
                 "sample_size": len(g.per_query) if g else 0,
-            } if g else None,
+            }
+            if g
+            else None,
             "end_to_end": {
                 "rouge_l_f1": e.rouge_l_f1,
                 "bleu_1": e.bleu_1,
@@ -327,11 +331,7 @@ def _composite_score(result: FullEvalResult) -> dict:
         generation_score = 0.0
 
     # 端到端得分
-    e2e_score = (
-        e.rouge_l_f1 * 0.30
-        + e.semantic_similarity * 0.35
-        + e.exact_match_partial * 0.35
-    )
+    e2e_score = e.rouge_l_f1 * 0.30 + e.semantic_similarity * 0.35 + e.exact_match_partial * 0.35
 
     overall = retrieval_score * 0.40 + generation_score * 0.40 + e2e_score * 0.20
 
@@ -378,7 +378,7 @@ def compare_pipelines(
             b = getattr(baseline, metric_name).get(k, 0)
             c = getattr(candidate, metric_name).get(k, 0)
             delta = c - b
-            pct = f"{delta/b*100:+.1f}%" if b > 0 else "N/A"
+            pct = f"{delta / b * 100:+.1f}%" if b > 0 else "N/A"
             deltas[f"{metric_name}@{k}"] = {
                 "baseline": round(b, 4),
                 "candidate": round(c, 4),

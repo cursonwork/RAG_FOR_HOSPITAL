@@ -85,9 +85,7 @@ def rewrite_query(
 
         # ── 单轮短问题：多查询扩展 ──
         if len(question) < 25:
-            variants_str = llm.invoke(
-                MULTI_QUERY_PROMPT.format(question=question)
-            ).content.strip()
+            variants_str = llm.invoke(MULTI_QUERY_PROMPT.format(question=question)).content.strip()
             variants = [v.strip() for v in variants_str.split("\n") if v.strip()]
             # 过滤明显不好的变体
             variants = [v for v in variants if 5 <= len(v) <= 300]
@@ -99,9 +97,7 @@ def rewrite_query(
 
         # ── 单轮长问题：步骤回退 ──
         if len(question) > 120:
-            broader = llm.invoke(
-                STEP_BACK_PROMPT.format(question=question)
-            ).content.strip()
+            broader = llm.invoke(STEP_BACK_PROMPT.format(question=question)).content.strip()
             if broader and broader != question and 10 <= len(broader) <= 300:
                 logger.debug("查询改写 (回退): %s", broader)
                 return [broader, question]

@@ -14,9 +14,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.config import settings
-from src.retrieval_eval import load_paper1_queries, run_eval, compare_pipelines
-from src.vector_store import get_vector_store
 from src.reranker import get_reranker
+from src.retrieval_eval import compare_pipelines, load_paper1_queries, run_eval
+from src.vector_store import get_vector_store
 
 
 def baseline_retrieve(query: str, k: int = 5):
@@ -58,7 +58,9 @@ def main():
     print("─" * 36)
     baseline = run_eval(
         lambda q: baseline_retrieve(q, k=max(k_values)),
-        queries, k_values=k_values, name="baseline",
+        queries,
+        k_values=k_values,
+        name="baseline",
     )
     _print_result(baseline, k_values)
 
@@ -68,7 +70,9 @@ def main():
     print("─" * 36)
     hybrid = run_eval(
         lambda q: hybrid_retrieve(q, k=max(k_values)),
-        queries, k_values=k_values, name="hybrid",
+        queries,
+        k_values=k_values,
+        name="hybrid",
     )
     _print_result(hybrid, k_values)
 
@@ -78,7 +82,9 @@ def main():
     print("─" * 36)
     rerank = run_eval(
         lambda q: hybrid_rerank_retrieve(q, k=max(k_values)),
-        queries, k_values=k_values, name="hybrid+rerank",
+        queries,
+        k_values=k_values,
+        name="hybrid+rerank",
     )
     _print_result(rerank, k_values)
 
@@ -90,7 +96,8 @@ def main():
     comparison = compare_pipelines(
         lambda q: baseline_retrieve(q, k=5),
         lambda q: hybrid_rerank_retrieve(q, k=5),
-        queries, k_values=(5,),
+        queries,
+        k_values=(5,),
     )
 
     for key, vals in comparison["deltas"].items():

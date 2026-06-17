@@ -1,0 +1,32 @@
+target-version = "py313"
+line-length = 120
+
+exclude = [
+    ".venv",
+    "__pycache__",
+    ".git",
+    ".claude",
+    "volumes",
+    "data/vector_db",
+]
+
+[lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # Pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "SIM", # flake8-simplify
+    "TCH", # flake8-type-checking-imports
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+    "B008",  # do not perform function calls in argument defaults
+    "TC001", "TC002", "TC003",  # type-checking imports (mypy handles this)
+]
+
+[format]
+quote-style = "double"
+indent-style = "space"

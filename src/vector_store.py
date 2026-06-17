@@ -7,6 +7,7 @@ BM25 使用 rank_bm25 客户端实现，文本常驻内存，不依赖 Milvus SP
 Milvus 仅存储稠密向量 + 元数据（chunk_id/source/page/section/chunk_type）。
 """
 
+import threading
 import uuid
 
 from langchain_core.documents import Document
@@ -19,15 +20,12 @@ from src.logger import get_logger
 
 logger = get_logger(__name__)
 
-COLLECTION_NAME = "hospital_knowledge"
-DIMENSION = 1024
-
 
 class MilvusStore(VectorStore):
-    """基于 pymilvus MilvusClient 的向量存储，支持稠密检索 + BM25 混合检索。"""
+    """Based on pymilvus MilvusClient, supporting dense retrieval + BM25 hybrid search."""
 
     def __init__(self) -> None:
-        logger.info("连接 Milvus %s:%d", settings.milvus_host, settings.milvus_port)
+        logger.info("Connecting Milvus %s:%d", settings.milvus_host, settings.milvus_port)
         self._client = MilvusClient(
             host=settings.milvus_host,
             port=settings.milvus_port,
@@ -35,15 +33,31 @@ class MilvusStore(VectorStore):
         self._embedding = create_embeddings()
         self._ensure_collection()
 
+    def _embed(self, texts: list[str]) -> list[list[float]]:
+        """Embed texts with error handling. Raises on failure."""
+        try:
+            return self._embedding.embed_documents(texts)
+        except Exception:
+            logger.exception("Embedding failed")
+            raise
+
+    def _milvus_insert(self, data: list[dict]) -> None:
+        """Insert vectors into Milvus. Raises on failure."""
+        try:
+            self._client.insert(collection_name=settings.milvus_collection_name, data=data)
+        except Exception:
+            logger.exception("Milvus insert failed")
+            raise
+
     def _ensure_collection(self) -> None:
         """确保 collection 存在（简单 schema：稠密向量 + 元数据）。"""
-        if self._client.has_collection(COLLECTION_NAME):
-            logger.debug("Collection '%s' 已存在", COLLECTION_NAME)
+        if self._client.has_collection(settings.milvus_collection_name):
+            logger.debug("Collection '%s' 已存在", settings.milvus_collection_name)
             return
-        logger.info("创建 Collection: %s (dim=%d, metric=COSINE)", COLLECTION_NAME, DIMENSION)
+        logger.info("创建 Collection: %s (dim=%d, metric=COSINE)", settings.milvus_collection_name, settings.embedding_dimension)
         self._client.create_collection(
-            collection_name=COLLECTION_NAME,
-            dimension=DIMENSION,
+            collection_name=settings.milvus_collection_name,
+            dimension=settings.embedding_dimension,
             metric_type="COSINE",
             auto_id=True,
         )
@@ -53,14 +67,12 @@ class MilvusStore(VectorStore):
         store = cls()
         docs = [
             Document(page_content=t, metadata=m or {})
-            for t, m in zip(texts, metadatas or [{}] * len(texts))
+            for t, m in zip(texts, metadatas or [{}] * len(texts), strict=False)
         ]
         store.add_documents(docs)
         return store
 
-    def add_documents(
-        self, documents: list[Document], **kwargs
-    ) -> list[str]:
+    def add_documents(self, documents: list[Document], **kwargs) -> list[str]:
         """分块 → 写 PG → Embed → 写 Milvus。返回 chunk_id 列表。"""
         from src.text_splitter import create_semantic_splitter
 
@@ -75,15 +87,11 @@ class MilvusStore(VectorStore):
         milvus_data: list[dict] = []
 
         texts = [chunk.page_content for chunk in chunks]
-        try:
-            embeddings = self._embedding.embed_documents(texts)
-        except Exception:
-            logger.exception("Embedding 失败")
-            raise
+        embeddings = self._embed(texts)
 
         from src.database import save_chunk
 
-        for chunk, emb in zip(chunks, embeddings):
+        for chunk, emb in zip(chunks, embeddings, strict=False):
             chunk_id = uuid.uuid4().hex[:16]
             source = chunk.metadata.get("source", "")
             page = chunk.metadata.get("page", 0)
@@ -101,20 +109,18 @@ class MilvusStore(VectorStore):
             )
 
             chunk_ids.append(chunk_id)
-            milvus_data.append({
-                "vector": emb,
-                "chunk_id": chunk_id,
-                "source": source,
-                "page": page,
-                "section": section,
-                "chunk_type": "text",
-            })
+            milvus_data.append(
+                {
+                    "vector": emb,
+                    "chunk_id": chunk_id,
+                    "source": source,
+                    "page": page,
+                    "section": section,
+                    "chunk_type": "text",
+                }
+            )
 
-        try:
-            self._client.insert(collection_name=COLLECTION_NAME, data=milvus_data)
-        except Exception:
-            logger.exception("Milvus 写入失败")
-            raise
+        self._milvus_insert(milvus_data)
 
         logger.info("文本块写入完成: %d 条", len(chunk_ids))
         return chunk_ids
@@ -131,16 +137,12 @@ class MilvusStore(VectorStore):
             text = r.caption or f"[图片] {r.source} 第{r.page}页"
             texts.append(text)
 
-        logger.info("写入 %d 张图片占位", len(texts))
-        try:
-            embeddings = self._embedding.embed_documents(texts)
-        except Exception:
-            logger.exception("图片占位 Embedding 失败")
-            raise
+        logger.info("写 %d image placeholder(s)", len(texts))
+        embeddings = self._embed(texts)
 
         chunk_ids: list[str] = []
 
-        for record, emb in zip(records, embeddings):
+        for record, emb in zip(records, embeddings, strict=False):
             chunk_id = uuid.uuid4().hex[:16]
 
             save_chunk(
@@ -168,15 +170,20 @@ class MilvusStore(VectorStore):
             record.chunk_id = chunk_id
             chunk_ids.append(chunk_id)
 
-            self._client.insert(collection_name=COLLECTION_NAME, data=[{
-                "vector": emb,
-                "chunk_id": chunk_id,
-                "image_id": record.id,
-                "source": record.source,
-                "page": record.page,
-                "section": "",
-                "chunk_type": "image",
-            }])
+            self._client.insert(
+                collection_name=settings.milvus_collection_name,
+                data=[
+                    {
+                        "vector": emb,
+                        "chunk_id": chunk_id,
+                        "image_id": record.id,
+                        "source": record.source,
+                        "page": record.page,
+                        "section": "",
+                        "chunk_type": "image",
+                    }
+                ],
+            )
 
         logger.info("图片占位写入完成: %d 条", len(chunk_ids))
         return chunk_ids
@@ -198,23 +205,28 @@ class MilvusStore(VectorStore):
             logger.exception("图片向量更新 Embedding 失败")
             return
 
-        for record, emb, text in zip(records, embeddings, texts):
+        for record, emb, text in zip(records, embeddings, texts, strict=False):
             if not record.chunk_id:
                 continue
             update_chunk_content(record.chunk_id, text)
             self._client.delete(
-                collection_name=COLLECTION_NAME,
+                collection_name=settings.milvus_collection_name,
                 filter=f'chunk_id == "{record.chunk_id}"',
             )
-            self._client.insert(collection_name=COLLECTION_NAME, data=[{
-                "vector": emb,
-                "chunk_id": record.chunk_id,
-                "image_id": record.id,
-                "source": record.source,
-                "page": record.page,
-                "section": "",
-                "chunk_type": "image",
-            }])
+            self._client.insert(
+                collection_name=settings.milvus_collection_name,
+                data=[
+                    {
+                        "vector": emb,
+                        "chunk_id": record.chunk_id,
+                        "image_id": record.id,
+                        "source": record.source,
+                        "page": record.page,
+                        "section": "",
+                        "chunk_type": "image",
+                    }
+                ],
+            )
 
     def add_image_descriptions(self, records) -> list[str]:
         """（兼容旧接口）将图片描述向量化后写入 Milvus + PG images 表。"""
@@ -231,16 +243,12 @@ class MilvusStore(VectorStore):
             texts.append("\n".join(parts))
 
         logger.info("开始 Embedding: %d 个图片描述", len(texts))
-        try:
-            embeddings = self._embedding.embed_documents(texts)
-        except Exception:
-            logger.exception("图片描述 Embedding 失败")
-            raise
+        embeddings = self._embed(texts)
 
         chunk_ids: list[str] = []
         milvus_data: list[dict] = []
 
-        for i, (record, emb) in enumerate(zip(records, embeddings)):
+        for i, (record, emb) in enumerate(zip(records, embeddings, strict=False)):
             chunk_id = uuid.uuid4().hex[:16]
             image_id = record.id
             text = texts[i]
@@ -268,39 +276,35 @@ class MilvusStore(VectorStore):
             )
 
             chunk_ids.append(chunk_id)
-            milvus_data.append({
-                "vector": emb,
-                "chunk_id": chunk_id,
-                "image_id": image_id,
-                "source": record.source,
-                "page": record.page,
-                "section": "",
-                "chunk_type": "image",
-            })
+            milvus_data.append(
+                {
+                    "vector": emb,
+                    "chunk_id": chunk_id,
+                    "image_id": image_id,
+                    "source": record.source,
+                    "page": record.page,
+                    "section": "",
+                    "chunk_type": "image",
+                }
+            )
 
-        try:
-            self._client.insert(collection_name=COLLECTION_NAME, data=milvus_data)
-        except Exception:
-            logger.exception("Milvus 图片写入失败")
-            raise
+        self._milvus_insert(milvus_data)
 
         logger.info("图片描述写入完成: %d 条", len(chunk_ids))
         return chunk_ids
 
     def delete_all(self) -> None:
         """清空 Milvus 中所有数据（重建 collection）。"""
-        if self._client.has_collection(COLLECTION_NAME):
-            self._client.drop_collection(COLLECTION_NAME)
-            logger.info("已删除 collection: %s", COLLECTION_NAME)
+        if self._client.has_collection(settings.milvus_collection_name):
+            self._client.drop_collection(settings.milvus_collection_name)
+            logger.info("已删除 collection: %s", settings.milvus_collection_name)
         self._ensure_collection()
 
     # ═══════════════════════════════════════════════════════════════
     # 检索
     # ═══════════════════════════════════════════════════════════════
 
-    def similarity_search(
-        self, query: str, k: int = 5, **kwargs
-    ) -> list[Document]:
+    def similarity_search(self, query: str, k: int = 5, **kwargs) -> list[Document]:
         """纯稠密向量检索。"""
         logger.debug("相似度检索 query='%s...' k=%d", query[:80], k)
 
@@ -312,7 +316,7 @@ class MilvusStore(VectorStore):
 
         try:
             results = self._client.search(
-                collection_name=COLLECTION_NAME,
+                collection_name=settings.milvus_collection_name,
                 data=[query_emb],
                 limit=k,
                 output_fields=["chunk_id", "image_id", "source", "page", "section", "chunk_type"],
@@ -323,9 +327,7 @@ class MilvusStore(VectorStore):
 
         return self._hits_to_docs(results[0] if results else [])
 
-    def hybrid_search(
-        self, query: str, k: int | None = None, **kwargs
-    ) -> list[Document]:
+    def hybrid_search(self, query: str, k: int | None = None, **kwargs) -> list[Document]:
         """BM25 + 稠密向量混合检索，RRF 融合。
 
         客户端 BM25 (rank_bm25) + Milvus 稠密向量 → RRF 融合。
@@ -411,12 +413,15 @@ class MilvusStore(VectorStore):
 # ═══════════════════════════════════════════════════════════════
 
 _store: MilvusStore | None = None
+_store_lock = threading.Lock()
 
 
 def get_vector_store() -> MilvusStore:
     global _store
     if _store is None:
-        _store = MilvusStore()
+        with _store_lock:
+            if _store is None:
+                _store = MilvusStore()
     return _store
 
 
@@ -429,14 +434,15 @@ def add_documents_to_store(documents: list[Document]) -> None:
         store.add_documents(documents)
 
         if settings.enable_image_understanding:
-            from src.image_pipeline import save_image_placeholders, fill_image_descriptions
+            from src.image_pipeline import fill_image_descriptions, save_image_placeholders
 
             all_records: list = []
             for doc in documents:
                 file_path = doc.metadata.get("file_path", "")
                 source = doc.metadata.get("source", "")
-                if not file_path:
-                    logger.warning("文档缺少 file_path，跳过图片处理: %s", source)
+                if not file_path or not file_path.lower().endswith(".pdf"):
+                    if file_path:
+                        logger.debug("非 PDF 文件，跳过图片处理: %s", source)
                     continue
 
                 try:

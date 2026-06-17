@@ -34,15 +34,25 @@ def get_engine() -> Engine:
 
 def _ensure_tables() -> None:
     engine = get_engine()
+
+    # Apply any pending migrations (for future schema changes)
+    from src.migrations import run_migrations
+
+    run_migrations(engine)
+
+    # Legacy inline DDL — ensures backward compatibility for existing installs
     with engine.begin() as conn:
-        conn.execute(text("""
+        conn.execute(
+            text("""
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
                 username VARCHAR(255) UNIQUE NOT NULL,
                 created_at TIMESTAMPTZ DEFAULT NOW()
             )
-        """))
-        conn.execute(text("""
+        """)
+        )
+        conn.execute(
+            text("""
             CREATE TABLE IF NOT EXISTS sessions (
                 id VARCHAR(64) PRIMARY KEY,
                 user_id INT REFERENCES users(id) ON DELETE CASCADE,
@@ -51,8 +61,10 @@ def _ensure_tables() -> None:
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             )
-        """))
-        conn.execute(text("""
+        """)
+        )
+        conn.execute(
+            text("""
             CREATE TABLE IF NOT EXISTS messages (
                 id SERIAL PRIMARY KEY,
                 session_id VARCHAR(64) REFERENCES sessions(id) ON DELETE CASCADE,
@@ -60,18 +72,24 @@ def _ensure_tables() -> None:
                 content TEXT NOT NULL,
                 created_at TIMESTAMPTZ DEFAULT NOW()
             )
-        """))
-        conn.execute(text("""
+        """)
+        )
+        conn.execute(
+            text("""
             CREATE INDEX IF NOT EXISTS idx_messages_session
             ON messages(session_id, created_at)
-        """))
-        conn.execute(text("""
+        """)
+        )
+        conn.execute(
+            text("""
             CREATE INDEX IF NOT EXISTS idx_sessions_user
             ON sessions(user_id, updated_at DESC)
-        """))
+        """)
+        )
 
         # ── 知识库分块与图片表 ──
-        conn.execute(text("""
+        conn.execute(
+            text("""
             CREATE TABLE IF NOT EXISTS chunks (
                 id VARCHAR(64) PRIMARY KEY,
                 content TEXT NOT NULL,
@@ -82,8 +100,10 @@ def _ensure_tables() -> None:
                 chunk_type VARCHAR(20) DEFAULT 'text',
                 created_at TIMESTAMPTZ DEFAULT NOW()
             )
-        """))
-        conn.execute(text("""
+        """)
+        )
+        conn.execute(
+            text("""
             CREATE TABLE IF NOT EXISTS images (
                 id VARCHAR(64) PRIMARY KEY,
                 chunk_id VARCHAR(64) REFERENCES chunks(id),
@@ -99,21 +119,25 @@ def _ensure_tables() -> None:
                 bbox_y1 FLOAT,
                 created_at TIMESTAMPTZ DEFAULT NOW()
             )
-        """))
-        conn.execute(text("""
+        """)
+        )
+        conn.execute(
+            text("""
             CREATE INDEX IF NOT EXISTS idx_chunks_source
             ON chunks(source, page)
-        """))
-        conn.execute(text("""
+        """)
+        )
+        conn.execute(
+            text("""
             CREATE INDEX IF NOT EXISTS idx_images_source
             ON images(source, page)
-        """))
+        """)
+        )
 
         # 为已有 images 表补充 bbox 列（兼容旧表）
-        for col in ("bbox_x0", "bbox_y0", "bbox_x1", "bbox_y1"):
-            conn.execute(text(
-                f"ALTER TABLE images ADD COLUMN IF NOT EXISTS {col} FLOAT"
-            ))
+        _ALLOWED_COLS = {"bbox_x0", "bbox_y0", "bbox_x1", "bbox_y1"}
+        for col in _ALLOWED_COLS:
+            conn.execute(text(f"ALTER TABLE images ADD COLUMN IF NOT EXISTS {col} FLOAT"))
     logger.info("数据库表初始化完成")
 
 
@@ -139,10 +163,7 @@ def create_session(session_id: str, user_id: int, mode: str = "medical_qa") -> N
     engine = get_engine()
     with engine.begin() as conn:
         conn.execute(
-            text(
-                "INSERT INTO sessions (id, user_id, mode) "
-                "VALUES (:id, :user_id, :mode)"
-            ),
+            text("INSERT INTO sessions (id, user_id, mode) VALUES (:id, :user_id, :mode)"),
             {"id": session_id, "user_id": user_id, "mode": mode},
         )
     logger.info("创建会话: %s (user_id=%d, mode=%s)", session_id, user_id, mode)
@@ -187,6 +208,7 @@ def update_session_mode(session_id: str, mode: str) -> None:
 
 
 # ── 知识库分块 CRUD ──
+
 
 def save_chunk(
     chunk_id: str,
@@ -270,6 +292,7 @@ def update_chunk_content(chunk_id: str, content: str) -> None:
 
 # ── 图片 CRUD ──
 
+
 def save_image(
     image_id: str,
     chunk_id: str,
@@ -322,8 +345,10 @@ def get_image(image_id: str) -> dict | None:
     engine = get_engine()
     with engine.connect() as conn:
         row = conn.execute(
-            text("SELECT id, chunk_id, image_data, image_format, description, caption, "
-                 "source, page, bbox_x0, bbox_y0, bbox_x1, bbox_y1 FROM images WHERE id = :id"),
+            text(
+                "SELECT id, chunk_id, image_data, image_format, description, caption, "
+                "source, page, bbox_x0, bbox_y0, bbox_x1, bbox_y1 FROM images WHERE id = :id"
+            ),
             {"id": image_id},
         ).first()
     if row is None:

@@ -21,10 +21,7 @@ class PostgresChatMessageHistory(BaseChatMessageHistory):
     def messages(self) -> list[BaseMessage]:
         with self._engine.connect() as conn:
             rows = conn.execute(
-                text(
-                    "SELECT role, content FROM messages "
-                    "WHERE session_id = :sid ORDER BY created_at"
-                ),
+                text("SELECT role, content FROM messages WHERE session_id = :sid ORDER BY created_at"),
                 {"sid": self.session_id},
             ).fetchall()
 
@@ -44,10 +41,7 @@ class PostgresChatMessageHistory(BaseChatMessageHistory):
 
         with self._engine.begin() as conn:
             conn.execute(
-                text(
-                    "INSERT INTO messages (session_id, role, content) "
-                    "VALUES (:sid, :role, :content)"
-                ),
+                text("INSERT INTO messages (session_id, role, content) VALUES (:sid, :role, :content)"),
                 {"sid": self.session_id, "role": role, "content": content},
             )
 
@@ -70,9 +64,6 @@ class PostgresChatMessageHistory(BaseChatMessageHistory):
             title += "..."
         with self._engine.begin() as conn:
             conn.execute(
-                text(
-                    "UPDATE sessions SET title = :title "
-                    "WHERE id = :sid AND title IS NULL"
-                ),
+                text("UPDATE sessions SET title = :title WHERE id = :sid AND title IS NULL"),
                 {"sid": self.session_id, "title": title},
             )
